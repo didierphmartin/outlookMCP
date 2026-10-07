@@ -9,11 +9,32 @@ MAX_RETRY_AFTER_S = 10.0
 
 
 class GraphError(Exception):
-    """A Graph failure the tools report as {"error": code}: reconnect_needed, throttled, not_found, graph_error."""
+    """A Graph failure the tools report as {"error": code}: reconnect_needed, throttled, not_found, network_error,
+    graph_error (with the HTTP status)."""
 
-    def __init__(self, code: str, message: str = ""):
+    def __init__(self, code: str, message: str = "", status: int = 0):
         super().__init__(f"{code}: {message}" if message else code)
-        self.code, self.message = code, message
+        self.code, self.message, self.status = code, message, status
+
+    @property
+    def transient(self) -> bool:
+        """Worth retrying later: throttling, the network, a 5xx."""
+        match self.code:
+            case "throttled" | "network_error":
+                return True
+            case "graph_error":
+                return self.status >= 500
+            case _:
+                return False
+
+    @classmethod
+    def from_auth(cls, e) -> "GraphError":
+        """A failed token refresh: transient trouble reaching the sign-in service, or a dead grant (sign in again)."""
+        match e.code:
+            case "network_error" | "identity_error" | "temporarily_unavailable":
+                return cls("network_error", str(e))
+            case _:
+                return cls("reconnect_needed", str(e))
 
 
 class StaticToken:
@@ -43,7 +64,7 @@ class TokenSource:
         try:
             tok = self.auth.refresh(conn["refresh_token"])
         except AuthError as e:
-            raise GraphError("reconnect_needed", str(e)) from None
+            raise GraphError.from_auth(e) from None
         if tok.get("refresh_token"):
             self.store.update_refresh_token(self.key, tok["refresh_token"])
         self._token, self._expires = tok["access_token"], self.clock() + float(tok.get("expires_in", 3600))
@@ -74,7 +95,7 @@ class GraphClient:
                 case 404:
                     raise GraphError("not_found", url)
                 case code:
-                    raise GraphError("graph_error", f"{code}: {r.text[:200]}")
+                    raise GraphError("graph_error", f"{code}: {r.text[:200]}", status=code)
         raise GraphError("graph_error", "no response")
 
     def get(self, path_or_url: str, params: dict | None = None) -> dict:

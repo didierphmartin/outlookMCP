@@ -215,3 +215,61 @@ def test_one_graph_client_per_connection(fake, cfg, http, store):
     assert built == ["key-1"]
     token_calls = [p for _, p in fake.requests if p.endswith("/oauth2/v2.0/token")]
     assert len(token_calls) == 1
+
+
+# fix round 1 -------------------------------------------------------------------------------
+
+def test_refresh_transport_error_is_network_error_not_reconnect(fake, cfg, store):
+    def handler(request):
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            raise httpx.ConnectError("dns failure", request=request)
+        return fake.handler(request)
+    svc = make_svc(fake, cfg, httpx.Client(transport=httpx.MockTransport(handler)), store)
+    assert poll(svc)["error"] == "network_error"
+
+
+def test_invalid_grant_is_still_reconnect_needed(fake, svc):
+    fake.revoke_refresh()
+    result = poll(svc)
+    assert result["error"] == "reconnect_needed" and "invalid_grant" in result["message"]
+
+
+def test_permanently_bad_message_is_reported_once_then_skipped(fake, svc, monkeypatch):
+    poll(svc)
+    a = fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    fake.add_message(subject="b", received="2026-10-07T10:02:00Z")
+    real = fake._graph
+
+    def broken(path, q):
+        if path == f"/me/messages/{a}":
+            return httpx.Response(400, json={"error": {"code": "ErrorInvalidRequest"}})
+        return real(path, q)
+    monkeypatch.setattr(fake, "_graph", broken)
+    assert poll(svc)["error"] == "graph_error"
+    assert poll(svc)["mail"]["subject"] == "b"
+    assert poll(svc) == {"mail": None}
+
+
+def test_unexpected_failure_is_internal_error(fake, svc, monkeypatch):
+    poll(svc)
+    fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    monkeypatch.setattr("mail.Message.shape", classmethod(lambda cls, m: 1 / 0))
+    result = poll(svc)
+    assert result["error"] == "internal_error" and "ZeroDivisionError" in result["message"]
+
+
+@pytest.mark.parametrize("value,expected", [("false", False), ("0", False), ("", False), (None, False),
+                                            (False, False), ("true", True), ("1", True), (True, True)])
+def test_has_attachments_flag_parsing(value, expected):
+    from mail import Filters
+    assert Filters.from_args({"has_attachments": value}).has_attachments is expected
+
+
+def test_body_text_survives_unclosed_head():
+    from extract import html_to_text
+    assert html_to_text("<html><head><style>p{}</style><body><p>Hi</p>") == "Hi"
+
+
+def test_body_text_separates_table_cells():
+    from extract import html_to_text
+    assert html_to_text("<table><tr><td>Amount</td><td>42</td></tr></table>") == "Amount 42"

@@ -45,7 +45,15 @@ class Filters:
     @classmethod
     def from_args(cls, args: dict) -> "Filters":
         return cls(str(args.get("from") or "").strip().lower(), str(args.get("subject_contains") or "").strip().lower(),
-                   bool(args.get("has_attachments")))
+                   cls._flag(args.get("has_attachments")))
+
+    @staticmethod
+    def _flag(value) -> bool:
+        match value:
+            case str():
+                return value.strip().lower() not in ("", "false", "0", "no", "off")
+            case _:
+                return bool(value)
 
     def signature(self) -> str:
         return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()[:16]
@@ -140,20 +148,25 @@ class MailService:
             while (mid := self.store.claim_next(key, scope)) is not None:
                 try:
                     m = graph.get(f"/me/messages/{mid}", {"$select": FULL_SELECT, "$expand": ATTACHMENT_META})
+                    return {"mail": Message.shape(m)}
                 except Exception as e:
                     match e:
                         case GraphError(code="not_found"):
                             continue                              # deleted meanwhile: skip it
-                        case _:
+                        case GraphError() if e.transient:
                             self.store.release(key, scope, mid)   # never handed out: offer it next poll
-                            raise
-                return {"mail": Message.shape(m)}
+                        case httpx.HTTPError():
+                            self.store.release(key, scope, mid)
+                    raise                                         # permanent: the message counts as consumed
             return {"mail": None}
         except GraphError as e:
             return {"error": e.code, "message": e.message}
         except AuthError as e:
-            return {"error": "reconnect_needed", "message": str(e)}
+            g = GraphError.from_auth(e)
+            return {"error": g.code, "message": g.message}
         except httpx.HTTPError as e:
             return {"error": "network_error", "message": f"{type(e).__name__}: {e}"[:200]}
         except ValueError as e:                                     # a non-JSON answer from Graph
             return {"error": "graph_error", "message": str(e)[:200]}
+        except Exception as e:                                      # the tool never raises
+            return {"error": "internal_error", "message": f"{type(e).__name__}: {e}"[:200]}

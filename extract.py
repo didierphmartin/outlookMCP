@@ -13,10 +13,15 @@ class _Text(HTMLParser):
         self.parts, self._skip = [], 0
 
     def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP:
-            self._skip += 1
-        elif tag in ("br", "p", "div", "li", "tr"):
-            self.parts.append("\n")
+        match tag:
+            case _ if tag in self.SKIP:
+                self._skip += 1
+            case "body":
+                self._skip = 0                  # an unclosed <head>/<style> must not swallow the body
+            case "br" | "p" | "div" | "li" | "tr":
+                self.parts.append("\n")
+            case "td" | "th":
+                self.parts.append(" ")
 
     def handle_endtag(self, tag):
         if tag in self.SKIP and self._skip:
