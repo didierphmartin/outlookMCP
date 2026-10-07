@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 from config import AppConfig
 from store import Store
@@ -33,11 +34,11 @@ def test_queue_is_oldest_first_and_idempotent(tmp_path):
     s = make(tmp_path)
     s.enqueue("k", "inbox|f", [("m2", "2026-10-07T10:02:00Z"), ("m1", "2026-10-07T10:01:00Z")])
     s.enqueue("k", "inbox|f", [("m1", "2026-10-07T10:01:00Z")])   # duplicate ignored
-    assert s.next_queued("k", "inbox|f") == "m1"
-    s.mark_delivered("k", "inbox|f", "m1")
+    assert s.claim_next("k", "inbox|f") == "m1"
     s.enqueue("k", "inbox|f", [("m1", "2026-10-07T10:01:00Z")])   # delivered stays delivered
-    assert s.next_queued("k", "inbox|f") == "m2"
-    assert s.next_queued("k", "other") is None
+    assert s.claim_next("k", "inbox|f") == "m2"
+    assert s.claim_next("k", "inbox|f") is None
+    assert s.claim_next("k", "other") is None
 
 
 def test_cursor_and_restart(tmp_path):
@@ -47,15 +48,47 @@ def test_cursor_and_restart(tmp_path):
     s.enqueue("k", "inbox|f", [("m1", "2026-10-07T10:01:00Z")])
     s2 = Store(str(tmp_path / "s.sqlite"), key)
     assert s2.cursor("k", "inbox|f") == {"delta_link": "https://delta/1", "since": "2026-10-07T10:00:00Z"}
-    assert s2.next_queued("k", "inbox|f") == "m1"
+    assert s2.claim_next("k", "inbox|f") == "m1"
 
 
 def test_prune_drops_old_delivered(tmp_path):
     now = [1000.0]
     s = make(tmp_path, clock=lambda: now[0])
     s.enqueue("k", "x", [("m1", "a")])
-    s.mark_delivered("k", "x", "m1")
+    assert s.claim_next("k", "x") == "m1"
     now[0] += 31 * 86400
     s.prune(days=30)
     s.enqueue("k", "x", [("m1", "a")])
-    assert s.next_queued("k", "x") == "m1"   # forgotten after 30 days (Graph ids of old mail won't reappear)
+    assert s.claim_next("k", "x") == "m1"   # forgotten after 30 days (Graph ids of old mail won't reappear)
+
+
+def test_concurrent_claims_deliver_each_message_once(tmp_path):
+    s = make(tmp_path)
+    s.enqueue("k", "x", [(f"m{i:03}", f"2026-10-07T10:{i % 60:02}:00Z") for i in range(200)])
+    got, lock = [], threading.Lock()
+
+    def worker():
+        while (m := s.claim_next("k", "x")) is not None:
+            with lock:
+                got.append(m)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(got) == 200 and len(set(got)) == 200
+
+
+def test_concurrent_take_connection_key_has_one_winner(tmp_path):
+    s = make(tmp_path)
+    s.create_connect("c1", {}, expires_at=2000)
+    s.finish_connect("c1", "connected", "key-1")
+    results, barrier = [], threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        results.append(s.take_connection_key("c1"))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert results.count("key-1") == 1 and results.count(None) == 7

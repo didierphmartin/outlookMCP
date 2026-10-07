@@ -7,6 +7,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 
 from cryptography.fernet import Fernet
 
@@ -25,6 +26,8 @@ CREATE TABLE IF NOT EXISTS queue (key_id TEXT, scope TEXT, message_id TEXT, rece
 class Store:
     def __init__(self, path: str, secret_key: str, clock=time.time):
         self._db = sqlite3.connect(path, check_same_thread=False)
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA busy_timeout=5000")
         self._db.executescript(SCHEMA)
         self._fernet = Fernet(secret_key.encode() if isinstance(secret_key, str) else secret_key)
         self._lock = threading.Lock()
@@ -39,6 +42,17 @@ class Store:
             cur = self._db.execute(sql, args)
             self._db.commit()
             return cur
+
+    @contextmanager
+    def _tx(self):
+        """Several statements under one lock and one transaction."""
+        with self._lock:
+            try:
+                yield self._db
+                self._db.commit()
+            except BaseException:
+                self._db.rollback()
+                raise
 
     def _enc(self, s: str) -> str:
         return self._fernet.encrypt(s.encode()).decode()
@@ -79,10 +93,12 @@ class Store:
                 (status, self._enc(connection_key) if connection_key else None, connect_id))
 
     def take_connection_key(self, connect_id: str) -> str | None:
-        row = self._x("SELECT connection_key FROM connects WHERE connect_id = ?", (connect_id,)).fetchone()
-        if not row or not row[0]:
-            return None
-        self._x("UPDATE connects SET connection_key = NULL WHERE connect_id = ?", (connect_id,))
+        """Atomic: the one-time key is handed to exactly one caller."""
+        with self._tx() as db:
+            row = db.execute("SELECT connection_key FROM connects WHERE connect_id = ?", (connect_id,)).fetchone()
+            if not row or not row[0]:
+                return None
+            db.execute("UPDATE connects SET connection_key = NULL WHERE connect_id = ?", (connect_id,))
         return self._dec(row[0])
 
     def connect_by_state(self, state: str) -> str | None:
@@ -103,18 +119,22 @@ class Store:
 
     def enqueue(self, connection_key: str, scope: str, items: list[tuple[str, str]]) -> None:
         kid = self.key_id(connection_key)
-        for message_id, received_at in items:
-            self._x("INSERT OR IGNORE INTO queue (key_id, scope, message_id, received_at) VALUES (?, ?, ?, ?)",
-                    (kid, scope, message_id, received_at))
+        with self._tx() as db:
+            db.executemany("INSERT OR IGNORE INTO queue (key_id, scope, message_id, received_at) VALUES (?, ?, ?, ?)",
+                           [(kid, scope, m, r) for m, r in items])
 
-    def next_queued(self, connection_key: str, scope: str) -> str | None:
-        row = self._x("SELECT message_id FROM queue WHERE key_id = ? AND scope = ? AND delivered = 0 "
-                      "ORDER BY received_at, message_id LIMIT 1", (self.key_id(connection_key), scope)).fetchone()
-        return row[0] if row else None
-
-    def mark_delivered(self, connection_key: str, scope: str, message_id: str) -> None:
-        self._x("UPDATE queue SET delivered = 1, delivered_at = ? WHERE key_id = ? AND scope = ? AND message_id = ?",
-                (self._clock(), self.key_id(connection_key), scope, message_id))
+    def claim_next(self, connection_key: str, scope: str) -> str | None:
+        """Oldest undelivered message, marked delivered in the same transaction. Delivery is
+        at-most-once by design: a message claimed but lost by the caller is not offered again."""
+        kid = self.key_id(connection_key)
+        with self._tx() as db:
+            row = db.execute("SELECT message_id FROM queue WHERE key_id = ? AND scope = ? AND delivered = 0 "
+                             "ORDER BY received_at, message_id LIMIT 1", (kid, scope)).fetchone()
+            if not row:
+                return None
+            db.execute("UPDATE queue SET delivered = 1, delivered_at = ? WHERE key_id = ? AND scope = ? AND message_id = ?",
+                       (self._clock(), kid, scope, row[0]))
+            return row[0]
 
     def prune(self, days: int = 30) -> None:
         self._x("DELETE FROM queue WHERE delivered = 1 AND delivered_at < ?", (self._clock() - days * 86400,))
