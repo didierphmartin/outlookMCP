@@ -202,3 +202,45 @@ def test_aadsts53003_is_policy_blocked(cfg):
     a = _auth_with(lambda r: httpx.Response(400, json={"error": "invalid_grant",
                                                         "error_description": "AADSTS53003: blocked"}), cfg)
     assert a.device_poll("dc-1") == ("policy_blocked", None)
+
+
+# fix round B7 ----------------------------------------------------------------------------
+
+def _me_fails(fake, monkeypatch, times):
+    real, left = fake._graph, [times]
+
+    def flaky(path, q):
+        if path == "/me" and left[0]:
+            left[0] -= 1
+            return httpx.Response(503, json={"error": {"code": "ServiceUnavailable"}})
+        return real(path, q)
+    monkeypatch.setattr(fake, "_graph", flaky)
+
+
+def test_identity_lookup_failing_twice_fails_the_connect(fake, http, cfg, monkeypatch):
+    c, t = connector(fake, http, cfg)
+    s = c.start()
+    fake.device_state = "connected"
+    _me_fails(fake, monkeypatch, times=2)
+    first = c.status(s["connect_id"])
+    assert first["status"] == "failed" and "graph_error" in first["message"]
+    assert not [tok for tok in fake.access_tokens | fake.refresh_tokens if tok in first["message"]]
+    t[0] += 10
+    assert c.status(s["connect_id"]) == first
+
+
+def test_identity_lookup_is_retried_once(fake, http, cfg, monkeypatch):
+    c, _ = connector(fake, http, cfg)
+    s = c.start()
+    fake.device_state = "connected"
+    _me_fails(fake, monkeypatch, times=1)
+    assert c.status(s["connect_id"])["status"] == "connected"
+
+
+def test_redirect_identity_lookup_failure_fails_the_connect(fake, http, cfg, monkeypatch):
+    c, _ = connector(fake, http, cfg)
+    s = c.start()
+    state = parse_qs(urlparse(c.redirect_start(s["connect_id"])).query)["state"][0]
+    _me_fails(fake, monkeypatch, times=2)
+    assert c.redirect_callback(state, "code-1").startswith("Sign-in failed")
+    assert c.status(s["connect_id"])["status"] == "failed"

@@ -115,6 +115,8 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
         if "id" not in body:
             return Response(status_code=202)               # a notification: accepted, no response body
         req_id, method, params = body.get("id"), body.get("method") or "", body.get("params") or {}
+        if not isinstance(params, dict) or not isinstance(params.get("arguments") or {}, dict):
+            return err(req_id, -32602, "invalid params: params and params.arguments must be objects")
         match method:
             case "initialize":
                 return ok(req_id, {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {}},

@@ -108,7 +108,7 @@ def test_identity_lookup_failure_after_device_sign_in_is_a_tool_result(fake, htt
     fake.device_state = "connected"
     _me_fails(fake, monkeypatch)
     result = call(c, "connect_status", {"connect_id": s["connect_id"]})
-    assert result["error"] == "graph_error" and set(result) == {"error", "message"}
+    assert result["status"] == "failed" and "graph_error" in result["message"]
 
 
 def test_callback_failure_is_a_short_page_without_tokens(fake, http, cfg, monkeypatch):
@@ -164,6 +164,16 @@ def test_fake_seed(cfg, tmp_path):
     s = call(c, "connect_start")
     key = call(c, "connect_status", {"connect_id": s["connect_id"]})["connection_key"]
     assert call(c, "poll_new_mail", {"folder": "Inbox"}, key=key)["mail"]["subject"] == "Seeded"
+
+
+def test_non_object_params_is_invalid_params(fake, http, cfg):
+    c = app(fake, http, cfg)
+    for params in ([1, 2], "x"):
+        r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": params})
+        assert r.status_code == 200 and r.json()["error"]["code"] == -32602 and r.json()["id"] == 3
+    r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                             "params": {"name": "whoami", "arguments": [1]}})
+    assert r.status_code == 200 and r.json()["error"]["code"] == -32602
 
 
 def test_fake_endpoints_absent_outside_fake_mode(fake, http, cfg):

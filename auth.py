@@ -132,13 +132,12 @@ class Connector:
                 self.store.update_connect(connect_id, data)
                 return {"status": "pending"}
             case "connected":
-                self._save(connect_id, tokens)
-                return self._connected(connect_id)
+                failure = self._save(connect_id, tokens)
+                return {"status": "failed", "message": failure} if failure else self._connected(connect_id)
             case "policy_blocked":
                 return self._policy_blocked(connect_id)
             case "failed":
-                self.store.update_connect(connect_id, {**data, "message": tokens["message"]})
-                self.store.finish_connect(connect_id, "failed")
+                self._fail(connect_id, tokens["message"])
                 return {"status": "failed", "message": tokens["message"]}
             case other:
                 self.store.finish_connect(connect_id, other)
@@ -151,13 +150,31 @@ class Connector:
                                "on the Outlook server to enable browser sign-in, or ask IT to allow device code."}
         return {"status": "policy_blocked", "redirect_url": f"{self.cfg.public_url}/auth/start?connect_id={connect_id}"}
 
-    def _save(self, connect_id: str, tokens: dict) -> None:
-        from graph import GraphClient, StaticToken
-        me = GraphClient(self.http, self.cfg.graph_base, StaticToken(tokens["access_token"])).get("/me")
+    def _save(self, connect_id: str, tokens: dict) -> str | None:
+        """Store the new connection. If the account lookup fails twice, the connect is recorded as failed
+        (the sign-in code is spent, so it cannot be retried) and the reason is returned."""
+        from graph import GraphClient, GraphError, StaticToken
+        graph = GraphClient(self.http, self.cfg.graph_base, StaticToken(tokens["access_token"]))
+        for _ in range(2):
+            try:
+                me = graph.get("/me")
+                break
+            except (GraphError, httpx.HTTPError, ValueError) as e:
+                code = getattr(e, "code", "network_error" if isinstance(e, httpx.HTTPError) else "graph_error")
+        else:
+            message = f"Signed in, but reading the account failed ({code}). Start again from the app."
+            self._fail(connect_id, message)
+            return message
         key = secrets.token_urlsafe(32)
         self.store.save_connection(key, me.get("mail") or me.get("userPrincipalName", ""),
                                    Auth.tenant_of(tokens), tokens["refresh_token"])
         self.store.finish_connect(connect_id, "connected", key)
+        return None
+
+    def _fail(self, connect_id: str, message: str) -> None:
+        """A terminal failure; later connect_status calls repeat the message."""
+        self.store.update_connect(connect_id, {**self.store.connect(connect_id)["data"], "message": message})
+        self.store.finish_connect(connect_id, "failed")
 
     def _connected(self, connect_id: str) -> dict:
         key = self.store.take_connection_key(connect_id)
@@ -191,5 +208,5 @@ class Connector:
         except AuthError as e:
             self.store.finish_connect(connect_id, "denied")
             return f"Sign-in failed: {e}"
-        self._save(connect_id, tokens)
-        return "Connected. You can close this tab and return to the app."
+        failure = self._save(connect_id, tokens)
+        return f"Sign-in failed: {failure}" if failure else "Connected. You can close this tab and return to the app."
