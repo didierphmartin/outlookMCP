@@ -1,6 +1,7 @@
 """The mailbox tools. poll_new_mail never touches attachment content (spec §5.1)."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from dataclasses import asdict, dataclass
@@ -10,7 +11,7 @@ from urllib.parse import quote
 import httpx
 
 from auth import AuthError
-from extract import body_text
+from extract import attachment_text, body_text
 from graph import GraphError
 
 DELTA_SELECT = "id,from,subject,receivedDateTime,hasAttachments"
@@ -159,14 +160,62 @@ class MailService:
                             self.store.release(key, scope, mid)
                     raise                                         # permanent: the message counts as consumed
             return {"mail": None}
-        except GraphError as e:
-            return {"error": e.code, "message": e.message}
-        except AuthError as e:
-            g = GraphError.from_auth(e)
-            return {"error": g.code, "message": g.message}
-        except httpx.HTTPError as e:
-            return {"error": "network_error", "message": f"{type(e).__name__}: {e}"[:200]}
-        except ValueError as e:                                     # a non-JSON answer from Graph
-            return {"error": "graph_error", "message": str(e)[:200]}
         except Exception as e:                                      # the tool never raises
-            return {"error": "internal_error", "message": f"{type(e).__name__}: {e}"[:200]}
+            return self._failure(e)
+
+    @staticmethod
+    def _failure(e: Exception) -> dict:
+        """Any failure -> the {"error": code, "message": ...} every tool returns."""
+        match e:
+            case GraphError():
+                return {"error": e.code, "message": e.message}
+            case AuthError():
+                g = GraphError.from_auth(e)
+                return {"error": g.code, "message": g.message}
+            case httpx.HTTPError():
+                return {"error": "network_error", "message": f"{type(e).__name__}: {e}"[:200]}
+            case ValueError():                                      # a non-JSON answer from Graph
+                return {"error": "graph_error", "message": str(e)[:200]}
+            case _:
+                return {"error": "internal_error", "message": f"{type(e).__name__}: {e}"[:200]}
+
+    def whoami(self, key: str, args: dict | None = None) -> dict:
+        try:
+            conn = self.store.connection(key)
+            if conn is None:
+                raise GraphError("reconnect_needed", "unknown or removed connection")
+            return {"account": conn["account"], "tenant": conn["tenant"], "connected_at": conn["connected_at"]}
+        except Exception as e:
+            return self._failure(e)
+
+    def list_folders(self, key: str, args: dict | None = None):
+        try:
+            graph, out = self._graph(key), []
+            for f in graph.get("/me/mailFolders", {"$top": "100"}).get("value", []):
+                out.append({"id": f["id"], "name": f["displayName"], "path": f["displayName"]})
+                for c in graph.get(f"/me/mailFolders/{f['id']}/childFolders", {"$top": "100"}).get("value", []):
+                    out.append({"id": c["id"], "name": c["displayName"], "path": f"{f['displayName']}/{c['displayName']}"})
+            return out
+        except Exception as e:
+            return self._failure(e)
+
+    def get_attachment(self, key: str, args: dict) -> dict:
+        """The ONLY place attachment content is downloaded or parsed (spec §5.1)."""
+        mid, aid = quote(str(args.get("mail_id") or ""), safe=""), quote(str(args.get("attachment_id") or ""), safe="")
+        try:
+            graph = self._graph(key)
+            meta = graph.get(f"/me/messages/{mid}/attachments/{aid}", {"$select": "id,name,contentType,size"})
+            name, ctype, size = meta.get("name", ""), meta.get("contentType", ""), int(meta.get("size") or 0)
+            if size > self.cfg.attachment_max_bytes:        # judged from metadata: nothing is downloaded
+                return {"error": "too_large", "message": f"{name} is {size} bytes (limit {self.cfg.attachment_max_bytes})"}
+            data = graph.get_bytes(f"/me/messages/{mid}/attachments/{aid}/$value")
+        except Exception as e:
+            return self._failure(e)
+        try:
+            text = attachment_text(name, ctype, data)
+        except Exception as e:  # noqa: BLE001 -- a corrupt/encrypted file is reported, never raised
+            return {"error": "unreadable", "name": name, "content_type": ctype, "size": size,
+                    "message": f"{type(e).__name__}: {e}"[:200]}
+        if text is None:
+            return {"name": name, "content_type": ctype, "size": size, "base64": base64.b64encode(data).decode()}
+        return {"name": name, "content_type": ctype, "size": size, "text": text}
