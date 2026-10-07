@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Start the Outlook MCP server. Reads .env next to this file (OUTLOOK_CLIENT_ID, OUTLOOK_SECRET_KEY, ...).
+# OUTLOOK_PYTHON picks the interpreter used to create .venv (default: python3 on PATH); it must be >= 3.10.
+# e.g. OUTLOOK_PYTHON=/usr/local/bin/python3 ./run.sh
+set -euo pipefail
+cd "$(dirname "$0")"
+[ -f .env ] && set -a && . ./.env && set +a
+if [ ! -d .venv ]; then
+  PY="${OUTLOOK_PYTHON:-python3}"
+  if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    echo "run.sh: '$PY' is missing or older than Python 3.10; set OUTLOOK_PYTHON to a 3.10+ interpreter" >&2
+    exit 1
+  fi
+  "$PY" -m venv .venv
+fi
+.venv/bin/pip install -q -r requirements.txt
+exec .venv/bin/python server.py
