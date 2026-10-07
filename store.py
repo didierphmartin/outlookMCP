@@ -136,5 +136,10 @@ class Store:
                        (self._clock(), kid, scope, row[0]))
             return row[0]
 
+    def release(self, connection_key: str, scope: str, message_id: str) -> None:
+        """Undo a claim whose message the server itself failed to fetch: it was never handed to anyone."""
+        self._x("UPDATE queue SET delivered = 0, delivered_at = NULL WHERE key_id = ? AND scope = ? AND message_id = ?",
+                (self.key_id(connection_key), scope, message_id))
+
     def prune(self, days: int = 30) -> None:
         self._x("DELETE FROM queue WHERE delivered = 1 AND delivered_at < ?", (self._clock() - days * 86400,))

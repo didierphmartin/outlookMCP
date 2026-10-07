@@ -13,7 +13,8 @@ from urllib.parse import parse_qs, quote, urlparse
 import httpx
 
 FOLDERS = [{"id": "inbox-id", "displayName": "Inbox", "wellKnown": "inbox"},
-           {"id": "invoices-id", "displayName": "Invoices", "parent": "inbox-id"}]
+           {"id": "invoices-id", "displayName": "Invoices", "parent": "inbox-id"},
+           {"id": "projects-id", "displayName": "Projects"}]
 
 
 class FakeGraph:
@@ -54,6 +55,10 @@ class FakeGraph:
     def remove_message(self, mid: str) -> None:
         m = self.messages.pop(mid)
         self.removed.append((next(self._seq), m["folder"], mid))
+
+    def touch_message(self, mid: str) -> None:
+        """Change a message (read, flagged, ...): like real Graph, the next delta round sends it again."""
+        self.messages[mid]["seq"] = next(self._seq)
 
     def revoke_refresh(self) -> None:
         self.refresh_tokens.clear()
@@ -148,21 +153,23 @@ class FakeGraph:
         return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
 
     def _delta(self, fid: str, q: dict) -> httpx.Response:
+        """Like real Graph: pages are not oldest-first (newest-first here), changed messages come again,
+        and the nextLink/deltaLink keep the original $filter."""
         after = int(q.get("$deltatoken", ["0"])[0])
         since = q.get("$filter", ["receivedDateTime ge "])[0].removeprefix("receivedDateTime ge ")
         skip = int(q.get("$skiptoken", ["0"])[0])
-        changes = [m for m in sorted(self.messages.values(), key=lambda m: m["seq"])
+        changes = [m for m in sorted(self.messages.values(), key=lambda m: m["seq"], reverse=True)
                    if m["folder"] == fid and m["seq"] > after and m["receivedDateTime"] >= since]
         changes = [{k: v for k, v in m.items() if k in ("id", "from", "subject", "receivedDateTime", "hasAttachments")}
                    for m in changes]
         changes += [{"id": mid, "@removed": {"reason": "deleted"}} for seq, f, mid in self.removed if f == fid and seq > after]
         page, rest = changes[skip:skip + 2], changes[skip + 2:]
         base = f"https://graph.microsoft.com/v1.0/me/mailFolders/{fid}/messages/delta"
+        keep_filter = "&$filter=" + quote(f"receivedDateTime ge {since}") if since else ""
         body = {"value": page}
         if rest:
-            body["@odata.nextLink"] = (f"{base}?$deltatoken={after}&$skiptoken={skip + 2}"
-                                       + ("&$filter=" + quote(f"receivedDateTime ge {since}") if since else ""))
+            body["@odata.nextLink"] = f"{base}?$deltatoken={after}&$skiptoken={skip + 2}{keep_filter}"
         else:
             top = max([m["seq"] for m in self.messages.values()] + [s for s, _, _ in self.removed] + [after])
-            body["@odata.deltaLink"] = f"{base}?$deltatoken={top}"
+            body["@odata.deltaLink"] = f"{base}?$deltatoken={top}{keep_filter}"
         return httpx.Response(200, json=body)
