@@ -4,11 +4,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from urllib.parse import quote
 
 import httpx
+from cryptography.fernet import InvalidToken
 
 from auth import AuthError
 from extract import attachment_text, body_text
@@ -70,15 +72,17 @@ class MailService:
         self.graph_for, self.store, self.cfg = graph_for, store, cfg
         self.now_iso = now_iso or self.utc_now
         self._graphs: dict = {}          # connection key -> GraphClient (one TokenSource per connection)
+        self._graphs_lock = threading.Lock()
 
     @staticmethod
     def utc_now() -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def _graph(self, key: str):
-        if key not in self._graphs:
-            self._graphs[key] = self.graph_for(key)
-        return self._graphs[key]
+        with self._graphs_lock:
+            if key not in self._graphs:
+                self._graphs[key] = self.graph_for(key)
+            return self._graphs[key]
 
     # folders -------------------------------------------------------------------------
     def _folder_id(self, graph, folder: str) -> str:
@@ -109,12 +113,27 @@ class MailService:
         """Read the folder's delta since the cursor and queue the matching new messages. The queue (not the
         delta order) decides delivery order; re-sent (changed) messages are already queued and stay ignored."""
         cur = self.store.cursor(key, scope)
-        if cur is None:
-            since = self.now_iso()
-            url, params = f"/me/mailFolders/{folder_id}/messages/delta", {
-                "$filter": f"receivedDateTime ge {since}", "$select": DELTA_SELECT}
-        else:
-            since, url, params = cur["since"], cur["delta_link"], None
+        if cur is None:                             # first use: "now", saved before Graph is asked, so a failed
+            cur = {"delta_link": None, "since": self.now_iso()}   # first round does not move it forward
+            self.store.save_cursor(key, scope, None, cur["since"])
+        since = cur["since"]
+        fresh = (f"/me/mailFolders/{folder_id}/messages/delta",
+                 {"$filter": f"receivedDateTime ge {since}", "$select": DELTA_SELECT})
+        try:
+            found, delta_link = self._read_delta(graph, *((cur["delta_link"], None) if cur["delta_link"] else fresh),
+                                                 since, filters)
+        except GraphError as e:
+            if e.code != "sync_state_lost" or not cur["delta_link"]:
+                raise
+            # The delta link is stale (410 / SyncState*): start again from `since`. Already queued or delivered
+            # messages come back too, and the queue ignores them, so nothing is delivered twice.
+            found, delta_link = self._read_delta(graph, *fresh, since, filters)
+        self.store.enqueue(key, scope, found)       # before the cursor: a crash re-reads, never loses
+        self.store.save_cursor(key, scope, delta_link, since)
+
+    @staticmethod
+    def _read_delta(graph, url: str, params: dict | None, since: str, filters: Filters) -> tuple[list, str]:
+        """Every page of one delta round -> ([(id, receivedDateTime) of matching new mail], the next delta link)."""
         found = []
         while True:
             page = graph.get(url, params)
@@ -122,13 +141,9 @@ class MailService:
             for m in page.get("value", []):
                 if "@removed" not in m and (m.get("receivedDateTime") or "") >= since and filters.match(m):
                     found.append((m["id"], m["receivedDateTime"]))
-            if "@odata.nextLink" in page:
-                url = page["@odata.nextLink"]
-                continue
-            delta_link = page["@odata.deltaLink"]
-            break
-        self.store.enqueue(key, scope, found)       # before the cursor: a crash re-reads, never loses
-        self.store.save_cursor(key, scope, delta_link, since)
+            if "@odata.nextLink" not in page:
+                return found, page["@odata.deltaLink"]
+            url = page["@odata.nextLink"]
 
     def _scope(self, graph, args: dict) -> tuple[str, str, Filters]:
         filters = Filters.from_args(args)
@@ -174,6 +189,9 @@ class MailService:
                 return {"error": g.code, "message": g.message}
             case httpx.HTTPError():
                 return {"error": "network_error", "message": f"{type(e).__name__}: {e}"[:200]}
+            case InvalidToken():                                    # OUTLOOK_SECRET_KEY changed since the sign-in
+                return {"error": "reconnect_needed",
+                        "message": "the stored sign-in cannot be decrypted (server key changed): connect the mailbox again"}
             case ValueError():                                      # a non-JSON answer from Graph
                 return {"error": "graph_error", "message": str(e)[:200]}
             case _:
@@ -211,6 +229,9 @@ class MailService:
             data = graph.get_bytes(f"/me/messages/{mid}/attachments/{aid}/$value")
         except Exception as e:
             return self._failure(e)
+        if len(data) > self.cfg.attachment_max_bytes:       # metadata size 0 or missing must not bypass the cap
+            return {"error": "too_large", "message": f"{name} is {len(data)} bytes (limit {self.cfg.attachment_max_bytes})"}
+        size = size or len(data)
         try:
             text = attachment_text(name, ctype, data)
         except Exception as e:  # noqa: BLE001 -- a corrupt/encrypted file is reported, never raised

@@ -37,11 +37,16 @@ class Store:
     def key_id(connection_key: str) -> str:
         return hashlib.sha256(connection_key.encode()).hexdigest()
 
-    def _x(self, sql: str, args: tuple = ()):
+    def _x(self, sql: str, args: tuple = ()) -> list[tuple]:
+        """One statement; its rows are fetched under the lock (tool calls run on worker threads)."""
         with self._lock:
-            cur = self._db.execute(sql, args)
+            rows = self._db.execute(sql, args).fetchall()
             self._db.commit()
-            return cur
+            return rows
+
+    def _one(self, sql: str, args: tuple = ()) -> tuple | None:
+        rows = self._x(sql, args)
+        return rows[0] if rows else None
 
     @contextmanager
     def _tx(self):
@@ -66,8 +71,8 @@ class Store:
                 (self.key_id(connection_key), account, tenant, self._enc(refresh_token), self._clock()))
 
     def connection(self, connection_key: str) -> dict | None:
-        row = self._x("SELECT account, tenant, refresh_token, connected_at FROM connections WHERE key_id = ?",
-                      (self.key_id(connection_key),)).fetchone()
+        row = self._one("SELECT account, tenant, refresh_token, connected_at FROM connections WHERE key_id = ?",
+                        (self.key_id(connection_key),))
         if not row:
             return None
         return {"account": row[0], "tenant": row[1], "refresh_token": self._dec(row[2]), "connected_at": row[3]}
@@ -82,15 +87,25 @@ class Store:
                 (connect_id, json.dumps(data), expires_at))
 
     def connect(self, connect_id: str) -> dict | None:
-        row = self._x("SELECT data, expires_at, status FROM connects WHERE connect_id = ?", (connect_id,)).fetchone()
+        row = self._one("SELECT data, expires_at, status FROM connects WHERE connect_id = ?", (connect_id,))
         return {"data": json.loads(row[0]), "expires_at": row[1], "status": row[2]} if row else None
 
     def update_connect(self, connect_id: str, data: dict) -> None:
         self._x("UPDATE connects SET data = ? WHERE connect_id = ?", (json.dumps(data), connect_id))
 
-    def finish_connect(self, connect_id: str, status: str, connection_key: str | None = None) -> None:
-        self._x("UPDATE connects SET status = ?, connection_key = ? WHERE connect_id = ?",
-                (status, self._enc(connection_key) if connection_key else None, connect_id))
+    def finish_connect(self, connect_id: str, status: str, connection_key: str | None = None) -> bool:
+        """End a pending connect. False when it had already ended (a concurrent request won): a late
+        failure or expiry never overwrites a connected row, nor drops its one-time key."""
+        with self._tx() as db:
+            return db.execute("UPDATE connects SET status = ?, connection_key = ? WHERE connect_id = ? AND status = 'pending'",
+                              (status, self._enc(connection_key) if connection_key else None, connect_id)).rowcount == 1
+
+    def reopen_connect(self, connect_id: str, data: dict, expires_at: float) -> bool:
+        """An ended (not connected) connect becomes pending again, for the browser sign-in fallback."""
+        with self._tx() as db:
+            return db.execute("UPDATE connects SET status = 'pending', data = ?, expires_at = ? "
+                              "WHERE connect_id = ? AND status != 'connected'",
+                              (json.dumps(data), expires_at, connect_id)).rowcount == 1
 
     def take_connection_key(self, connect_id: str) -> str | None:
         """Atomic: the one-time key is handed to exactly one caller."""
@@ -102,18 +117,19 @@ class Store:
         return self._dec(row[0])
 
     def connect_by_state(self, state: str) -> str | None:
-        for cid, data in self._x("SELECT connect_id, data FROM connects WHERE status = 'pending'").fetchall():
+        for cid, data in self._x("SELECT connect_id, data FROM connects WHERE status = 'pending'"):
             if json.loads(data).get("state") == state:
                 return cid
         return None
 
     # cursors + queue ---------------------------------------------------------
     def cursor(self, connection_key: str, scope: str) -> dict | None:
-        row = self._x("SELECT delta_link, since FROM cursors WHERE key_id = ? AND scope = ?",
-                      (self.key_id(connection_key), scope)).fetchone()
+        row = self._one("SELECT delta_link, since FROM cursors WHERE key_id = ? AND scope = ?",
+                        (self.key_id(connection_key), scope))
         return {"delta_link": row[0], "since": row[1]} if row else None
 
-    def save_cursor(self, connection_key: str, scope: str, delta_link: str, since: str) -> None:
+    def save_cursor(self, connection_key: str, scope: str, delta_link: str | None, since: str) -> None:
+        """delta_link None: `since` is fixed but no delta round has completed yet."""
         self._x("INSERT OR REPLACE INTO cursors VALUES (?, ?, ?, ?)",
                 (self.key_id(connection_key), scope, delta_link, since))
 

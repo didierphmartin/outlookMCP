@@ -244,3 +244,75 @@ def test_redirect_identity_lookup_failure_fails_the_connect(fake, http, cfg, mon
     _me_fails(fake, monkeypatch, times=2)
     assert c.redirect_callback(state, "code-1").startswith("Sign-in failed")
     assert c.status(s["connect_id"])["status"] == "failed"
+
+
+# final review fixes ------------------------------------------------------------------------
+
+def _bad_client_http(fake):
+    def handler(request):
+        if request.url.path.endswith("/token") and "device_code" in request.content.decode():
+            return httpx.Response(400, json={"error": "invalid_client", "error_description": "AADSTS7000218"})
+        return fake.handler(request)
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _ended(c, t, fake, how):
+    """A connect that ended as expired, denied or failed."""
+    s = c.start()
+    match how:
+        case "expired":
+            t[0] += 901
+        case "denied":
+            fake.device_state = "declined"
+            t[0] += 6
+    return s["connect_id"], c.status(s["connect_id"])
+
+
+@pytest.mark.parametrize("how", ["expired", "denied", "failed"])
+def test_ended_connect_offers_browser_sign_in(fake, http, cfg, how):
+    c, t = connector(fake, _bad_client_http(fake) if how == "failed" else http, cfg)
+    cid, st = _ended(c, t, fake, how)
+    url = f"https://synergy.example.com/outlook/auth/start?connect_id={cid}"
+    assert st["status"] == how and st["redirect_url"] == url
+    assert c.status(cid)["redirect_url"] == url                      # later polls repeat it
+    q = parse_qs(urlparse(c.redirect_start(cid)).query)              # the link actually works
+    assert c.status(cid)["status"] == "pending"
+    assert "Connected" in c.redirect_callback(q["state"][0], "auth-code-1")
+    done = c.status(cid)
+    assert done["status"] == "connected" and done["connection_key"]
+
+
+@pytest.mark.parametrize("how", ["expired", "denied", "failed"])
+def test_ended_connect_without_public_url_has_no_redirect(fake, http, cfg, how):
+    c, t = connector(fake, _bad_client_http(fake) if how == "failed" else http, replace(cfg, public_url=""))
+    _, st = _ended(c, t, fake, how)
+    assert st["status"] == how and "redirect_url" not in st
+
+
+def test_browser_sign_in_is_not_cut_short_by_the_device_code_expiry(fake, http, cfg):
+    c, t = connector(fake, http, cfg)
+    s = c.start()
+    fake.device_state = "blocked"
+    t[0] += 6
+    assert c.status(s["connect_id"])["status"] == "policy_blocked"
+    q = parse_qs(urlparse(c.redirect_start(s["connect_id"])).query)
+    t[0] += 890                                               # the device code is about to expire
+    polls = sum(1 for _, p in fake.requests if p.endswith("/token"))
+    assert c.status(s["connect_id"])["status"] == "pending"
+    assert sum(1 for _, p in fake.requests if p.endswith("/token")) == polls   # no device polling meanwhile
+    t[0] += 20                                                # past the device code's life
+    assert "Connected" in c.redirect_callback(q["state"][0], "auth-code-1")
+    assert c.status(s["connect_id"])["status"] == "connected"
+
+
+def test_late_device_failure_does_not_hide_a_concurrent_connect(fake, http, cfg, monkeypatch):
+    c, t = connector(fake, http, cfg)
+    s = c.start()
+
+    def racing_poll(device_code):                             # another request connected meanwhile
+        c.store.finish_connect(s["connect_id"], "connected", "key-9")
+        return "failed", {"message": "AADSTS70000: code already redeemed"}
+    monkeypatch.setattr(c.auth, "device_poll", racing_poll)
+    c.store.save_connection("key-9", "me@contoso.com", "tid-1", "RT")
+    st = c.status(s["connect_id"])
+    assert st["status"] == "connected" and st["connection_key"] == "key-9"

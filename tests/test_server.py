@@ -178,3 +178,47 @@ def test_non_object_params_is_invalid_params(fake, http, cfg):
 
 def test_fake_endpoints_absent_outside_fake_mode(fake, http, cfg):
     assert app(fake, http, cfg).get("/fake/requests").status_code == 404
+
+
+# final review fixes ------------------------------------------------------------------------
+
+def test_tool_calls_run_concurrently(fake, http, cfg, monkeypatch):
+    """A slow tool call (a blocking Graph request) must not stall the others."""
+    import threading
+
+    import anyio
+    released = threading.Event()
+
+    def status(self, connect_id):
+        if connect_id == "slow":
+            return {"released": released.wait(3)}
+        released.set()
+        return {"status": "unknown"}
+    monkeypatch.setattr("auth.Connector.status", status)
+    application = create_app(cfg, http=http, fake=fake)
+
+    async def main():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://t") as client:
+            async def one(cid):
+                r = await client.post("/mcp", json={"jsonrpc": "2.0", "id": cid, "method": "tools/call",
+                                                    "params": {"name": "connect_status", "arguments": {"connect_id": cid}}})
+                return json.loads(r.json()["result"]["content"][0]["text"])
+            results = {}
+
+            async def run(cid):
+                results[cid] = await one(cid)
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(run, "slow")
+                await anyio.sleep(0.05)
+                tg.start_soon(run, "fast")
+            return results
+    assert anyio.run(main)["slow"] == {"released": True}
+
+
+def test_changed_secret_key_is_reconnect_needed_over_mcp(fake, http, cfg):
+    from config import AppConfig
+    c = app(fake, http, cfg)
+    key = connect(c, fake)
+    c2 = app(fake, http, dataclasses.replace(cfg, secret_key=AppConfig.new_secret_key()))
+    for tool in ("whoami", "poll_new_mail"):
+        assert call(c2, tool, {"folder": "Inbox"}, key=key)["error"] == "reconnect_needed"

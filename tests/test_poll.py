@@ -306,3 +306,57 @@ def test_non_json_fetch_body_keeps_the_mail(fake, svc, monkeypatch):
     assert poll(svc)["error"] == "graph_error"
     assert poll(svc)["mail"]["subject"] == "a"
     assert poll(svc) == {"mail": None}
+
+
+# final review fixes ------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status", [410, 400])
+def test_stale_delta_link_restarts_delta_without_redelivery(fake, svc, status):
+    poll(svc)
+    fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    fake.add_message(subject="b", received="2026-10-07T10:02:00Z")
+    assert poll(svc)["mail"]["subject"] == "a"
+    assert poll(svc)["mail"]["subject"] == "b"
+    fake.delta_link_failure = status                     # the stored delta link is no longer valid
+    fake.add_message(subject="c", received="2026-10-07T10:03:00Z")
+    before = len(fake.requests)
+    assert poll(svc)["mail"]["subject"] == "c"
+    assert poll(svc) == {"mail": None}                   # a and b are not delivered again
+    restarted = [p for _, p in fake.requests[before:] if "/messages/delta" in p and "deltatoken" not in p]
+    assert len(restarted) == 1 and "receivedDateTime" in restarted[0] and "10%3A00%3A00Z" in restarted[0]
+    fake.add_message(subject="d", received="2026-10-07T10:04:00Z")
+    assert poll(svc)["mail"]["subject"] == "d"           # the new delta link works
+
+
+def test_failed_first_delta_does_not_move_now_forward(fake, cfg, http, store, monkeypatch):
+    clock = ["2026-10-07T10:00:00Z"]
+    svc = MailService(lambda key: GraphClient(http, cfg.graph_base, TokenSource(Auth(http, cfg), store, key)),
+                      store, cfg, now_iso=lambda: clock[0])
+    real, failed = fake._graph, []
+
+    def flaky(path, q):
+        if path.endswith("/messages/delta") and not failed:
+            failed.append(path)
+            return httpx.Response(503, json={"error": {"code": "ServiceUnavailable"}})
+        return real(path, q)
+    monkeypatch.setattr(fake, "_graph", flaky)
+    assert poll(svc)["error"] == "graph_error"
+    fake.add_message(subject="between", received="2026-10-07T10:05:00Z")
+    clock[0] = "2026-10-07T10:10:00Z"                    # the first delta failed; time moved on
+    assert poll(svc)["mail"]["subject"] == "between"
+
+
+def test_changed_secret_key_is_reconnect_needed(fake, cfg, http, store):
+    from config import AppConfig
+    other = Store(cfg.db_path, AppConfig.new_secret_key())    # OUTLOOK_SECRET_KEY changed
+    svc = make_svc(fake, cfg, http, other)
+    assert poll(svc)["error"] == "reconnect_needed"
+    assert svc.whoami("key-1")["error"] == "reconnect_needed"
+
+
+def test_every_graph_request_asks_for_immutable_ids(fake, svc):
+    poll(svc)
+    fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    poll(svc)
+    graph = [h for (_, p), h in zip(fake.requests, fake.headers) if "/oauth2/" not in p]
+    assert graph and all(h.get("prefer") == 'IdType="ImmutableId"' for h in graph)

@@ -71,3 +71,12 @@ def test_get_attachment_graph_failures(fake, svc):
     fake.throttle_next = 2
     svc._graphs.clear()
     assert svc.get_attachment("key-1", args)["error"] == "throttled"
+
+
+def test_get_attachment_size_cap_applies_to_downloaded_bytes(fake, svc):
+    from dataclasses import replace
+    svc.cfg = replace(svc.cfg, attachment_max_bytes=3)
+    mid = fake.add_message(attachments=[("big.txt", "text/plain", b"12345")])
+    fake.messages[mid]["attachments"][0]["size"] = 0          # metadata says 0 (or nothing)
+    r = svc.get_attachment("key-1", {"mail_id": mid, "attachment_id": f"{mid}-a0"})
+    assert r["error"] == "too_large" and "text" not in r and "base64" not in r

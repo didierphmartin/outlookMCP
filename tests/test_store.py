@@ -92,3 +92,19 @@ def test_concurrent_take_connection_key_has_one_winner(tmp_path):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert results.count("key-1") == 1 and results.count(None) == 7
+
+
+def test_late_failure_does_not_overwrite_connected(tmp_path):
+    s = make(tmp_path)
+    s.create_connect("c1", {}, expires_at=2000)
+    assert s.finish_connect("c1", "connected", "key-1") is True
+    assert s.finish_connect("c1", "failed") is False       # a concurrent poll lost the race
+    assert s.finish_connect("c1", "expired") is False
+    assert s.connect("c1")["status"] == "connected"
+    assert s.take_connection_key("c1") == "key-1"          # the key was not nulled
+
+
+def test_x_returns_rows_fetched_under_the_lock(tmp_path):
+    s = make(tmp_path)
+    s.create_connect("c1", {}, expires_at=2000)
+    assert s._x("SELECT connect_id FROM connects") == [("c1",)]

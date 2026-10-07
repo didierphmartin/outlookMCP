@@ -20,6 +20,7 @@ FOLDERS = [{"id": "inbox-id", "displayName": "Inbox", "wellKnown": "inbox"},
 class FakeGraph:
     def __init__(self):
         self.requests: list[tuple[str, str]] = []
+        self.headers: list[dict[str, str]] = []   # each request's headers, in the order of .requests
         self.messages: dict[str, dict] = {}       # id -> message (with folder, seq)
         self.removed: list[tuple[int, str, str]] = []   # (seq, folder, id)
         self.attachments: dict[str, bytes] = {}   # attachment id -> bytes
@@ -33,6 +34,9 @@ class FakeGraph:
         # because real Graph may reject an unknown well-known-folder name with 400. Ids and well-known names still work.
         self.folder_name_status: int | None = None
         self.account, self.tenant = "me@contoso.com", "tid-1"
+        # The next delta request made from a delta link answers this status: 410 (SyncStateNotFound) or
+        # 400 (SyncStateInvalid), as real Graph does when a delta link is too old or its sync state is gone.
+        self.delta_link_failure: int | None = None
 
     # test controls -------------------------------------------------------------
     def add_message(self, folder="inbox", subject="", sender="a@b.c", received="2026-10-07T10:00:00Z",
@@ -89,6 +93,7 @@ class FakeGraph:
     def handler(self, request: httpx.Request) -> httpx.Response:
         url = urlparse(str(request.url))
         self.requests.append((request.method, url.path + (f"?{url.query}" if url.query else "")))
+        self.headers.append(dict(request.headers))
         if url.path.endswith("/oauth2/v2.0/devicecode"):
             return httpx.Response(200, json={"device_code": "dc-1", "user_code": "K7PQ-M2XD",
                                              "verification_uri": "https://microsoft.com/devicelogin",
@@ -155,6 +160,10 @@ class FakeGraph:
     def _delta(self, fid: str, q: dict) -> httpx.Response:
         """Like real Graph: pages are not oldest-first (newest-first here), changed messages come again,
         and the nextLink/deltaLink keep the original $filter."""
+        if self.delta_link_failure and "$deltatoken" in q:
+            status, self.delta_link_failure = self.delta_link_failure, None
+            code = "SyncStateNotFound" if status == 410 else "SyncStateInvalid"
+            return httpx.Response(status, json={"error": {"code": code, "message": f"{code}: resync required"}})
         after = int(q.get("$deltatoken", ["0"])[0])
         since = q.get("$filter", ["receivedDateTime ge "])[0].removeprefix("receivedDateTime ge ")
         skip = int(q.get("$skiptoken", ["0"])[0])

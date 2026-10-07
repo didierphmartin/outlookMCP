@@ -8,6 +8,7 @@ import time
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from config import AppConfig
 
@@ -20,7 +21,9 @@ TOOLS = [
      "description": "Start connecting a mailbox. Returns a code the user enters at verification_uri (device sign-in).",
      "inputSchema": {"type": "object", "properties": {"method": {"type": "string", "enum": ["device"]}}}},
     {"name": "connect_status",
-     "description": "Status of a connect_start: pending, connected (with connection_key, once), expired, denied, policy_blocked.",
+     "description": ("Status of a connect_start: pending, connected (with connection_key, once), expired, denied, "
+                     "failed (with message), policy_blocked, or unknown. When the server has a public URL, policy_blocked, "
+                     "expired, denied and failed also carry redirect_url: a browser sign-in to try instead."),
      "inputSchema": {"type": "object", "properties": {"connect_id": {"type": "string"}}, "required": ["connect_id"]}},
     {"name": "whoami", "description": "The mailbox this connection reads.",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -126,8 +129,10 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
             case "tools/list":
                 return ok(req_id, {"tools": TOOLS})
             case "tools/call":
-                payload = call_tool(params.get("name") or "", params.get("arguments") or {},
-                                    request.headers.get(ACCOUNT_HEADER, ""))
+                # Tools block (sync httpx, up to 10 s Retry-After): a worker thread, so one slow mailbox
+                # does not stall every other call on the event loop.
+                payload = await run_in_threadpool(call_tool, params.get("name") or "", params.get("arguments") or {},
+                                                  request.headers.get(ACCOUNT_HEADER, ""))
                 if payload is None:
                     return err(req_id, -32601, f"unknown tool '{params.get('name')}'")
                 return ok(req_id, _wrap(payload))

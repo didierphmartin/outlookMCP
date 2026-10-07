@@ -96,6 +96,8 @@ class Auth:
 class Connector:
     """connect_start / connect_status, plus the redirect fallback's two endpoints."""
 
+    BROWSER_SIGN_IN_S = 900                 # how long a browser sign-in link stays valid
+
     def __init__(self, auth: Auth, store, http, cfg: AppConfig, clock=time.time):
         self.auth, self.store, self.http, self.cfg, self.clock = auth, store, http, cfg, clock
 
@@ -114,11 +116,12 @@ class Connector:
         if row["status"] == "connected":
             return self._connected(connect_id)
         if row["status"] != "pending":
-            return {"status": row["status"], **({"message": row["data"]["message"]} if "message" in row["data"] else {})}
+            return self._ended(connect_id, row["status"], row["data"].get("message"))
         if self.clock() > row["expires_at"]:
-            self.store.finish_connect(connect_id, "expired")
-            return {"status": "expired"}
+            return self._end(connect_id, "expired")
         data = row["data"]
+        if data.get("browser"):                  # the user is signing in in the browser: no device polling
+            return {"status": "pending"}
         if self.clock() - data["last_poll"] < data["interval"]:
             return {"status": "pending"}
         data["last_poll"] = self.clock()
@@ -133,22 +136,37 @@ class Connector:
                 return {"status": "pending"}
             case "connected":
                 failure = self._save(connect_id, tokens)
-                return {"status": "failed", "message": failure} if failure else self._connected(connect_id)
+                return self._ended(connect_id, "failed", failure) if failure else self._connected(connect_id)
             case "policy_blocked":
                 return self._policy_blocked(connect_id)
             case "failed":
-                self._fail(connect_id, tokens["message"])
-                return {"status": "failed", "message": tokens["message"]}
+                return self._end(connect_id, "failed", tokens["message"])
             case other:
-                self.store.finish_connect(connect_id, other)
-                return {"status": other}
+                return self._end(connect_id, other)
+
+    def _end(self, connect_id: str, status: str, message: str | None = None) -> dict:
+        """Record a terminal status. If a concurrent request already ended the connect (e.g. connected it),
+        that outcome stands and is what this caller sees."""
+        ended = self._fail(connect_id, message) if message else self.store.finish_connect(connect_id, status)
+        return self._ended(connect_id, status, message) if ended else self.status(connect_id)
+
+    def _ended(self, connect_id: str, status: str, message: str | None) -> dict:
+        """expired / denied / failed. With OUTLOOK_PUBLIC_URL, the browser sign-in is offered as well: real
+        Conditional Access does not always answer the device poll with AADSTS53003."""
+        out = {"status": status, **({"message": message} if message else {})}
+        if self.cfg.public_url:
+            out["redirect_url"] = self._start_url(connect_id)
+        return out
 
     def _policy_blocked(self, connect_id: str) -> dict:
         if not self.cfg.public_url:
             return {"status": "policy_blocked", "redirect_url": None,
                     "message": "Your organisation blocks code sign-in. Set OUTLOOK_PUBLIC_URL (https or localhost) "
                                "on the Outlook server to enable browser sign-in, or ask IT to allow device code."}
-        return {"status": "policy_blocked", "redirect_url": f"{self.cfg.public_url}/auth/start?connect_id={connect_id}"}
+        return {"status": "policy_blocked", "redirect_url": self._start_url(connect_id)}
+
+    def _start_url(self, connect_id: str) -> str:
+        return f"{self.cfg.public_url}/auth/start?connect_id={connect_id}"
 
     def _save(self, connect_id: str, tokens: dict) -> str | None:
         """Store the new connection. If the account lookup fails twice, the connect is recorded as failed
@@ -171,10 +189,12 @@ class Connector:
         self.store.finish_connect(connect_id, "connected", key)
         return None
 
-    def _fail(self, connect_id: str, message: str) -> None:
-        """A terminal failure; later connect_status calls repeat the message."""
+    def _fail(self, connect_id: str, message: str) -> bool:
+        """A terminal failure; later connect_status calls repeat the message. False if the connect had already ended."""
+        if not self.store.finish_connect(connect_id, "failed"):
+            return False
         self.store.update_connect(connect_id, {**self.store.connect(connect_id)["data"], "message": message})
-        self.store.finish_connect(connect_id, "failed")
+        return True
 
     def _connected(self, connect_id: str) -> dict:
         key = self.store.take_connection_key(connect_id)
@@ -190,12 +210,16 @@ class Connector:
         if not self.cfg.public_url:
             raise AuthError("no_public_url", "set OUTLOOK_PUBLIC_URL on the Outlook server to enable browser sign-in")
         row = self.store.connect(connect_id)
-        if row is None or row["status"] != "pending":
+        if row is None or row["status"] == "connected":
             raise AuthError("unknown_connect", "start again from the app")
         verifier = secrets.token_urlsafe(48)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
         state = secrets.token_urlsafe(16)
-        self.store.update_connect(connect_id, {**row["data"], "state": state, "verifier": verifier})
+        # Pending again (also after expired / denied / failed), browser-only, for a fresh sign-in window.
+        data = {k: v for k, v in row["data"].items() if k != "message"}
+        if not self.store.reopen_connect(connect_id, {**data, "state": state, "verifier": verifier, "browser": True},
+                                         expires_at=self.clock() + self.BROWSER_SIGN_IN_S):
+            raise AuthError("unknown_connect", "start again from the app")
         return self.auth.authorize_url(state, challenge, self._redirect_uri())
 
     def redirect_callback(self, state: str, code: str) -> str:
