@@ -53,13 +53,14 @@ class Auth:
         return self._post("devicecode", {"client_id": self.cfg.client_id, "scope": AppConfig.SCOPES})
 
     def device_poll(self, device_code: str) -> tuple[str, dict | None]:
+        """(status, tokens) when connected; ("failed", {"message": reason}) on a terminal error; else (status, None)."""
         try:
             return "connected", self._token({"grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                                              "device_code": device_code})
         except AuthError as e:
             match e.code:
-                case "authorization_pending":
-                    return "pending", None
+                case "authorization_pending" | "temporarily_unavailable" | "network_error" | "identity_error":
+                    return "pending", None          # transient: retry until the device code expires
                 case "slow_down":
                     return "slow_down", None
                 case "expired_token":
@@ -69,7 +70,7 @@ class Auth:
                 case _ if "AADSTS53003" in e.description or "AADSTS50097" in e.description:
                     return "policy_blocked", None   # Conditional Access blocks device-code sign-in
                 case _:
-                    return "failed", None
+                    return "failed", {"message": str(e)[:200]}   # e.g. a misconfigured app registration
 
     # PKCE redirect -----------------------------------------------------------------
     def authorize_url(self, state: str, challenge: str, redirect_uri: str) -> str:
@@ -113,7 +114,7 @@ class Connector:
         if row["status"] == "connected":
             return self._connected(connect_id)
         if row["status"] != "pending":
-            return {"status": row["status"]}
+            return {"status": row["status"], **({"message": row["data"]["message"]} if "message" in row["data"] else {})}
         if self.clock() > row["expires_at"]:
             self.store.finish_connect(connect_id, "expired")
             return {"status": "expired"}
@@ -135,6 +136,10 @@ class Connector:
                 return self._connected(connect_id)
             case "policy_blocked":
                 return self._policy_blocked(connect_id)
+            case "failed":
+                self.store.update_connect(connect_id, {**data, "message": tokens["message"]})
+                self.store.finish_connect(connect_id, "failed")
+                return {"status": "failed", "message": tokens["message"]}
             case other:
                 self.store.finish_connect(connect_id, other)
                 return {"status": other}
@@ -165,6 +170,8 @@ class Connector:
         return f"{self.cfg.public_url}/auth/callback"
 
     def redirect_start(self, connect_id: str) -> str:
+        if not self.cfg.public_url:
+            raise AuthError("no_public_url", "set OUTLOOK_PUBLIC_URL on the Outlook server to enable browser sign-in")
         row = self.store.connect(connect_id)
         if row is None or row["status"] != "pending":
             raise AuthError("unknown_connect", "start again from the app")

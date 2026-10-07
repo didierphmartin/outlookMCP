@@ -145,10 +145,57 @@ def test_transport_error_becomes_auth_error(cfg):
         a.refresh("rt")
 
 
-def test_timeout_during_device_poll_is_failed_not_crash(cfg):
+def test_timeout_during_device_poll_is_pending(cfg):
     def slow(request):
         raise httpx.ReadTimeout("timed out", request=request)
-    assert _auth_with(slow, cfg).device_poll("dc-1") == ("failed", None)
+    assert _auth_with(slow, cfg).device_poll("dc-1") == ("pending", None)
+
+
+def test_gateway_502_and_temporarily_unavailable_during_device_poll_are_pending(cfg):
+    html = _auth_with(lambda r: httpx.Response(502, text="<html>Bad Gateway</html>"), cfg)
+    assert html.device_poll("dc-1") == ("pending", None)
+    busy = _auth_with(lambda r: httpx.Response(503, json={"error": "temporarily_unavailable"}), cfg)
+    assert busy.device_poll("dc-1") == ("pending", None)
+
+
+def test_transient_error_keeps_connect_alive(fake, cfg):
+    calls = [0]
+
+    def flaky(request):
+        if request.url.path.endswith("/token") and calls[0] == 0:
+            calls[0] += 1
+            return httpx.Response(502, text="<html>Bad Gateway</html>")
+        return fake.handler(request)
+    http = httpx.Client(transport=httpx.MockTransport(flaky))
+    c, t = connector(fake, http, cfg)
+    s = c.start()
+    assert c.status(s["connect_id"])["status"] == "pending"
+    fake.device_state = "connected"
+    t[0] += 6
+    assert c.status(s["connect_id"])["status"] == "connected"
+
+
+def test_terminal_failure_reports_reason(fake, cfg):
+    def bad_client(request):
+        if request.url.path.endswith("/token"):
+            return httpx.Response(400, json={"error": "invalid_client",
+                                             "error_description": "AADSTS7000218: client_assertion or client_secret required."})
+        return fake.handler(request)
+    http = httpx.Client(transport=httpx.MockTransport(bad_client))
+    c, t = connector(fake, http, replace(cfg, client_secret="s3cret"))
+    s = c.start()
+    st = c.status(s["connect_id"])
+    assert st["status"] == "failed" and "AADSTS7000218" in st["message"] and "s3cret" not in st["message"]
+    again = c.status(s["connect_id"])                       # the reason survives on later polls
+    assert again == st
+
+
+def test_redirect_start_needs_public_url(fake, http, cfg):
+    c, t = connector(fake, http, replace(cfg, public_url=""))
+    s = c.start()
+    with pytest.raises(AuthError) as e:
+        c.redirect_start(s["connect_id"])
+    assert "OUTLOOK_PUBLIC_URL" in str(e.value)
 
 
 def test_aadsts53003_is_policy_blocked(cfg):
