@@ -33,7 +33,8 @@ def test_unknown_method_and_tool(tmp_path):
 
 
 def test_notifications_are_acknowledged(tmp_path):
-    assert "result" in rpc(client(tmp_path), "notifications/initialized", req_id=None)
+    r = client(tmp_path).post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    assert r.status_code == 202 and r.content == b""
 
 
 def test_from_env_requires_ids(monkeypatch):

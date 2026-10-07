@@ -273,3 +273,36 @@ def test_body_text_survives_unclosed_head():
 def test_body_text_separates_table_cells():
     from extract import html_to_text
     assert html_to_text("<table><tr><td>Amount</td><td>42</td></tr></table>") == "Amount 42"
+
+
+# fix round B7 ----------------------------------------------------------------------------
+
+def _fetch_fails(fake, monkeypatch, mid, response, times):
+    """The first `times` fetches of message `mid` answer `response()`; everything else is normal."""
+    real, left = fake._graph, [times]
+
+    def flaky(path, q):
+        if path == f"/me/messages/{mid}" and left[0]:
+            left[0] -= 1
+            return response()
+        return real(path, q)
+    monkeypatch.setattr(fake, "_graph", flaky)
+
+
+def test_reconnect_needed_on_fetch_keeps_the_mail(fake, svc, monkeypatch):
+    poll(svc)
+    a = fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    _fetch_fails(fake, monkeypatch, a, lambda: httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken"}}),
+                 times=2)                                  # refused even after a refresh: reconnect_needed
+    assert poll(svc)["error"] == "reconnect_needed"
+    assert poll(svc)["mail"]["subject"] == "a"           # the user reconnected: the mail was not lost
+    assert poll(svc) == {"mail": None}
+
+
+def test_non_json_fetch_body_keeps_the_mail(fake, svc, monkeypatch):
+    poll(svc)
+    a = fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    _fetch_fails(fake, monkeypatch, a, lambda: httpx.Response(200, content=b"<html>gateway</html>"), times=1)
+    assert poll(svc)["error"] == "graph_error"
+    assert poll(svc)["mail"]["subject"] == "a"
+    assert poll(svc) == {"mail": None}

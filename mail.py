@@ -149,16 +149,16 @@ class MailService:
             while (mid := self.store.claim_next(key, scope)) is not None:
                 try:
                     m = graph.get(f"/me/messages/{mid}", {"$select": FULL_SELECT, "$expand": ATTACHMENT_META})
-                    return {"mail": Message.shape(m)}
                 except Exception as e:
                     match e:
                         case GraphError(code="not_found"):
                             continue                              # deleted meanwhile: skip it
-                        case GraphError() if e.transient:
+                        case GraphError() if e.transient or e.code == "reconnect_needed":
                             self.store.release(key, scope, mid)   # never handed out: offer it next poll
-                        case httpx.HTTPError():
+                        case httpx.HTTPError() | ValueError():    # the network, or a non-JSON gateway page
                             self.store.release(key, scope, mid)
                     raise                                         # permanent: the message counts as consumed
+                return {"mail": Message.shape(m)}                 # a shape failure is permanent too: consumed
             return {"mail": None}
         except Exception as e:                                      # the tool never raises
             return self._failure(e)

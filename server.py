@@ -1,12 +1,13 @@
 """Outlook MCP server: JSON-RPC over HTTP, the shape gpt's MCP client and langfs use."""
 from __future__ import annotations
 
+import html
 import json
 import time
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from config import AppConfig
 
@@ -48,8 +49,29 @@ def _wrap(payload) -> dict:
 
 
 def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, clock=time.time, sleep=time.sleep) -> FastAPI:
+    from auth import Auth, AuthError, Connector
+    from graph import GraphClient, TokenSource
+    from mail import MailService
+    from store import Store
+
+    if http is None and cfg.fake_graph:
+        from fake_graph import FakeGraph
+        fake = FakeGraph()
+        fake.device_state = "connected"
+        _seed(fake, cfg.fake_seed)
+    if http is None:
+        http = httpx.Client(transport=httpx.MockTransport(fake.handler)) if fake else httpx.Client()
+
     app = FastAPI(title="outlook_mcp")
     app.state.cfg = cfg
+    app.state.clock_offset = [0.0]                     # tests move time forward
+    now = lambda: clock() + app.state.clock_offset[0]
+    store = Store(cfg.db_path, cfg.secret_key, clock=now)
+    auth = Auth(http, cfg)
+    connector = Connector(auth, store, http, cfg, clock=now)
+    graph_for = lambda key: GraphClient(http, cfg.graph_base, TokenSource(auth, store, key, clock=now), sleep=sleep)
+    mail = MailService(graph_for, store, cfg)
+    # No Store.prune here: forgetting delivered ids could re-deliver old mail that delta sends again.
 
     def ok(req_id, result):
         return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": result})
@@ -57,13 +79,41 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
     def err(req_id, code, message):
         return JSONResponse({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
 
+    def run_tool(name: str, args: dict, account_key: str):
+        match name:
+            case "connect_start":
+                return connector.start(args.get("method") or "device")
+            case "connect_status":
+                return connector.status(str(args.get("connect_id") or ""))
+            case "whoami" | "list_folders" | "poll_new_mail" | "get_attachment":
+                if not account_key:
+                    return {"error": "not_connected", "message": "missing X-Outlook-Account header: connect the mailbox first"}
+                if store.connection(account_key) is None:
+                    return {"error": "reconnect_needed", "message": "unknown or removed connection"}
+                return getattr(mail, name)(account_key, args)
+            case _:
+                return None
+
     def call_tool(name: str, args: dict, account_key: str):
-        return None   # B7 wires the tools
+        """A tool's payload; a failure (sign-in service, the post-sign-in /me lookup, ...) is an error result."""
+        try:
+            return run_tool(name, args, account_key)
+        except AuthError as e:
+            return {"error": e.code, "message": e.description or e.code}
+        except Exception as e:  # noqa: BLE001 -- a tool never answers with a 500
+            return MailService._failure(e)
 
     @app.post("/")
     @app.post("/mcp")
     async def rpc(request: Request):
-        body = await request.json()
+        try:
+            body = json.loads(await request.body())
+        except ValueError:
+            return err(None, -32700, "parse error: the body is not JSON")
+        if not isinstance(body, dict):
+            return err(None, -32600, "invalid request: expected one JSON-RPC object (batches are not supported)")
+        if "id" not in body:
+            return Response(status_code=202)               # a notification: accepted, no response body
         req_id, method, params = body.get("id"), body.get("method") or "", body.get("params") or {}
         match method:
             case "initialize":
@@ -79,12 +129,63 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
                 if payload is None:
                     return err(req_id, -32601, f"unknown tool '{params.get('name')}'")
                 return ok(req_id, _wrap(payload))
-            case m if m.startswith("notifications/"):
-                return ok(req_id, {})
             case _:
                 return err(req_id, -32601, f"unknown method '{method}'")
 
+    @app.get("/auth/start")
+    def auth_start(connect_id: str = ""):
+        try:
+            return RedirectResponse(connector.redirect_start(connect_id))
+        except AuthError as e:
+            return _page(f"Cannot start sign-in: {e.description or e.code}", status=400)
+
+    @app.get("/auth/callback")
+    def auth_callback(state: str = "", code: str = "", error_description: str = ""):
+        if not code:
+            return _page(f"Sign-in failed: {error_description or 'no code'}")
+        try:
+            return _page(connector.redirect_callback(state, code))
+        except Exception as e:  # noqa: BLE001 -- the code only: messages may echo service responses
+            return _page(f"Sign-in failed ({getattr(e, 'code', type(e).__name__)}). Start again from the app.")
+
+    if fake is not None and cfg.fake_graph:
+        @app.post("/fake/messages")
+        async def fake_add(request: Request):
+            m = await request.json()
+            atts = [(a["name"], a.get("content_type", "text/plain"), a.get("text", "").encode()) for a in m.get("attachments", [])]
+            mid = fake.add_message(folder=m.get("folder", "inbox"), subject=m.get("subject", ""),
+                                   sender=m.get("sender", "a@b.c"),
+                                   received=m.get("received") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                   attachments=atts, body_html=m.get("body_html", "<p>hi</p>"))
+            return {"id": mid}
+
+        @app.get("/fake/requests")
+        def fake_requests():
+            return {"requests": fake.requests}
+
+        @app.post("/fake/device")
+        async def fake_device(request: Request):
+            fake.device_state = (await request.json()).get("state", "connected")
+            return {"state": fake.device_state}
+
     return app
+
+
+def _page(message: str, status: int = 200) -> HTMLResponse:
+    """A short human page for the browser sign-in steps."""
+    return HTMLResponse(f"<!doctype html><meta charset=utf-8><p style='font:16px system-ui'>{html.escape(message)}</p>",
+                        status_code=status)
+
+
+def _seed(fake, path: str) -> None:
+    if not path:
+        return
+    with open(path, encoding="utf-8") as f:
+        for m in json.load(f):
+            fake.add_message(folder=m.get("folder", "inbox"), subject=m.get("subject", ""), sender=m.get("sender", "a@b.c"),
+                             received=m.get("received", "2099-01-01T00:00:00Z"),
+                             attachments=[(a["name"], a.get("content_type", "text/plain"), a.get("text", "").encode())
+                                          for a in m.get("attachments", [])])
 
 
 def main() -> None:  # pragma: no cover
