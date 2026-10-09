@@ -209,14 +209,14 @@ class MailService:
         except Exception as e:
             return self._failure(e)
 
-    def list_folders(self, key: str, args: dict | None = None):
+    def list_folders(self, key: str, args: dict | None = None) -> dict:
         try:
             graph, out = self._graph(key), []
             for f in graph.get("/me/mailFolders", {"$top": "100"}).get("value", []):
                 out.append({"id": f["id"], "name": f["displayName"], "path": f["displayName"]})
                 for c in graph.get(f"/me/mailFolders/{f['id']}/childFolders", {"$top": "100"}).get("value", []):
                     out.append({"id": c["id"], "name": c["displayName"], "path": f"{f['displayName']}/{c['displayName']}"})
-            return out
+            return {"folders": out}                       # an object: MCP structured results are objects
         except Exception as e:
             return self._failure(e)
 

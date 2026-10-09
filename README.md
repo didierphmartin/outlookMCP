@@ -89,13 +89,16 @@ as the server row's `X-Outlook-Account` header. Two mailboxes = two server rows.
 | `connect_start` | `{method?: "device"}` | `{connect_id, verification_uri, user_code, expires_in}` |
 | `connect_status` | `{connect_id}` | `{status, account?, connection_key?, message?, redirect_url?}`; status is `pending`, `connected`, `expired`, `denied`, `policy_blocked`, `failed` (+ `message`) or `unknown` (no such `connect_id`, e.g. a typo or another server's database). With `OUTLOOK_PUBLIC_URL`, `policy_blocked`, `expired`, `denied` and `failed` add `redirect_url` (browser sign-in). The key is returned once. |
 | `whoami` | — | `{account, tenant, connected_at}` |
-| `list_folders` | — | `[{id, name, path}]` |
-| `poll_new_mail` | `{folder, from?, subject_contains?, has_attachments?}` | `{mail: {...} \| null}` or `{error}` |
+| `list_folders` | — | `{folders: [{id, name, path}]}` |
+| `poll_new_mail` | `{folder, from?, subject_contains?, has_attachments?}` | `{mail: {id, from, to, cc, subject, received_at, body_text, web_link, attachments} \| null}` |
 | `get_attachment` | `{mail_id, attachment_id}` | `{name, content_type, size, text?, base64?}` |
 
-The mailbox tools need the `X-Outlook-Account` header. Every failure is a tool result
-`{"error": code, "message": ...}`, e.g. `not_connected`, `reconnect_needed` (sign in again),
-`throttled`, `network_error`, `unknown_folder`, `too_large`.
+Every tool publishes its result's JSON Schema (`outputSchema` in `tools/list`). A success carries the
+result as `structuredContent`, and the same JSON as text for clients that read `content` only.
+
+The mailbox tools need the `X-Outlook-Account` header. Every failure is an MCP tool error
+(`isError: true`) whose text is `{"error": code, "message": ...}`, e.g. `not_connected`,
+`reconnect_needed` (sign in again), `throttled`, `network_error`, `unknown_folder`, `too_large`.
 
 `poll_new_mail` starts its cursor at **now** (this server's clock) on first use of a folder + filter
 set (old mail is not replayed), and remembers what it delivered across restarts. If Graph drops the

@@ -9,9 +9,9 @@ def test_whoami(svc):
 
 
 def test_list_folders_with_paths(svc):
-    assert svc.list_folders("key-1") == [{"id": "inbox-id", "name": "Inbox", "path": "Inbox"},
-                                         {"id": "invoices-id", "name": "Invoices", "path": "Inbox/Invoices"},
-                                         {"id": "projects-id", "name": "Projects", "path": "Projects"}]
+    assert svc.list_folders("key-1")["folders"] == [{"id": "inbox-id", "name": "Inbox", "path": "Inbox"},
+                                                    {"id": "invoices-id", "name": "Invoices", "path": "Inbox/Invoices"},
+                                                    {"id": "projects-id", "name": "Projects", "path": "Projects"}]
 
 
 def test_list_folders_errors_are_returned(svc):
