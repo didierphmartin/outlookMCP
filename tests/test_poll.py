@@ -323,9 +323,26 @@ def test_stale_delta_link_restarts_delta_without_redelivery(fake, svc, status):
     assert poll(svc)["mail"]["subject"] == "c"
     assert poll(svc) == {"mail": None}                   # a and b are not delivered again
     restarted = [p for _, p in fake.requests[before:] if "/messages/delta" in p and "deltatoken" not in p]
-    assert len(restarted) == 1 and "receivedDateTime" in restarted[0] and "10%3A00%3A00Z" in restarted[0]
+    # The rescan starts at the newest mail already queued (b, 10:02), not at the sign-in (10:00).
+    assert len(restarted) == 1 and "receivedDateTime" in restarted[0] and "10%3A02%3A00Z" in restarted[0]
     fake.add_message(subject="d", received="2026-10-07T10:04:00Z")
     assert poll(svc)["mail"]["subject"] == "d"           # the new delta link works
+
+
+def test_stale_delta_link_rescans_only_from_the_newest_queued_mail(fake, svc):
+    # Months of handled mail must not be paged through again after the delta link is lost.
+    poll(svc)
+    for minute in range(1, 6):
+        fake.add_message(subject=f"m{minute}", received=f"2026-10-07T10:0{minute}:00Z")
+    for minute in range(1, 6):
+        assert poll(svc)["mail"]["subject"] == f"m{minute}"
+    fake.delta_link_failure = 410
+    fake.add_message(subject="late", received="2026-10-07T10:09:00Z")
+    before = len(fake.requests)
+    assert poll(svc)["mail"]["subject"] == "late"
+    assert poll(svc) == {"mail": None}                   # m1..m5 not delivered again
+    restarted = [p for _, p in fake.requests[before:] if "/messages/delta" in p and "deltatoken" not in p]
+    assert len(restarted) == 1 and "10%3A05%3A00Z" in restarted[0]
 
 
 def test_failed_first_delta_does_not_move_now_forward(fake, cfg, http, store, monkeypatch):

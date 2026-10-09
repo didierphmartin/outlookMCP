@@ -125,9 +125,12 @@ class MailService:
         except GraphError as e:
             if e.code != "sync_state_lost" or not cur["delta_link"]:
                 raise
-            # The delta link is stale (410 / SyncState*): start again from `since`. Already queued or delivered
-            # messages come back too, and the queue ignores them, so nothing is delivered twice.
-            found, delta_link = self._read_delta(graph, *fresh, since, filters)
+            # The delta link is stale (410 / SyncState*): start again from the newest mail already queued, not
+            # from `since`, so months of handled mail are not paged through again. That newest one (and any
+            # other at the same second) comes back too, and the queue ignores it, so nothing is delivered twice.
+            rescan = max(since, self.store.newest_received(key, scope) or since)
+            found, delta_link = self._read_delta(graph, fresh[0], {**fresh[1], "$filter": f"receivedDateTime ge {rescan}"},
+                                                 rescan, filters)
         self.store.enqueue(key, scope, found)       # before the cursor: a crash re-reads, never loses
         self.store.save_cursor(key, scope, delta_link, since)
 

@@ -139,6 +139,12 @@ class Store:
             db.executemany("INSERT OR IGNORE INTO queue (key_id, scope, message_id, received_at) VALUES (?, ?, ?, ?)",
                            [(kid, scope, m, r) for m, r in items])
 
+    def newest_received(self, connection_key: str, scope: str) -> str | None:
+        """receivedDateTime of the newest mail ever queued for this scope, delivered or not."""
+        row = self._one("SELECT MAX(received_at) FROM queue WHERE key_id = ? AND scope = ?",
+                        (self.key_id(connection_key), scope))
+        return row[0] if row else None
+
     def claim_next(self, connection_key: str, scope: str) -> str | None:
         """Oldest undelivered message, marked delivered in the same transaction. Delivery is
         at-most-once by design: a message claimed but lost by the caller is not offered again."""

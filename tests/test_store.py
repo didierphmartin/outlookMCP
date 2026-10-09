@@ -51,6 +51,16 @@ def test_cursor_and_restart(tmp_path):
     assert s2.claim_next("k", "inbox|f") == "m1"
 
 
+def test_newest_received_per_scope(tmp_path):
+    s = make(tmp_path)
+    assert s.newest_received("k", "x") is None
+    s.enqueue("k", "x", [("m1", "2026-10-07T10:02:00Z"), ("m2", "2026-10-07T10:01:00Z")])
+    s.enqueue("k", "y", [("m3", "2026-10-07T11:00:00Z")])
+    assert s.claim_next("k", "x") == "m2"                  # delivered rows count too
+    assert s.newest_received("k", "x") == "2026-10-07T10:02:00Z"
+    assert s.newest_received("other", "x") is None
+
+
 def test_prune_drops_old_delivered(tmp_path):
     now = [1000.0]
     s = make(tmp_path, clock=lambda: now[0])
