@@ -205,6 +205,8 @@ class MailService:
             conn = self.store.connection(key)
             if conn is None:
                 raise GraphError("reconnect_needed", "unknown or removed connection")
+            # Ask Microsoft too: a sign-in it now refuses is reconnect_needed here, not only at the next poll.
+            self._graph(key).get("/me", {"$select": "id"})
             return {"account": conn["account"], "tenant": conn["tenant"], "connected_at": conn["connected_at"]}
         except Exception as e:
             return self._failure(e)

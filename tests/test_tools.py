@@ -80,3 +80,9 @@ def test_get_attachment_size_cap_applies_to_downloaded_bytes(fake, svc):
     fake.messages[mid]["attachments"][0]["size"] = 0          # metadata says 0 (or nothing)
     r = svc.get_attachment("key-1", {"mail_id": mid, "attachment_id": f"{mid}-a0"})
     assert r["error"] == "too_large" and "text" not in r and "base64" not in r
+
+
+def test_whoami_asks_microsoft_so_a_refused_sign_in_is_reconnect_needed(fake, svc):
+    fake.revoke_refresh()                                   # e.g. AADSTS530035: the tenant now blocks the grant
+    w = svc.whoami("key-1")
+    assert w["error"] == "reconnect_needed" and "invalid_grant" in w["message"]

@@ -58,7 +58,8 @@ TOOLS = [
          "connection_key": {"type": "string", "description": "The connection's key, when connected (first answer only)"},
          "credential_header": {"type": "string", "description": "The request header the key goes in"}},
          "required": ["status"]}},
-    {"name": "whoami", "description": "The mailbox this connection reads." + _FAILS,
+    {"name": "whoami", "description": "The mailbox this connection reads, once Microsoft has confirmed its sign-in still works "
+                                   "(otherwise reconnect_needed)." + _FAILS,
      "inputSchema": {"type": "object", "properties": {}},
      "outputSchema": {"type": "object", "properties": {
          "account": {"type": "string", "description": "The mailbox address"}, "tenant": _STR,
