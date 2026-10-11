@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from graph import GraphError
 DELTA_SELECT = "id,from,subject,receivedDateTime,hasAttachments"
 FULL_SELECT = "id,from,toRecipients,ccRecipients,subject,receivedDateTime,body,webLink,hasAttachments"
 ATTACHMENT_META = "attachments($select=id,name,contentType,size)"   # metadata only, never contentBytes
+EMAIL = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
 
 
 class Message:
@@ -90,28 +92,32 @@ class MailService:
             return self._graphs[key]
 
     # folders -------------------------------------------------------------------------
-    def _folder_id(self, graph, folder: str) -> str:
-        """'Inbox', a well-known name, an id, a top-level display name, or a path 'Parent/Child' -> the folder id."""
+    def _folder_id(self, graph, folder: str, created: list[str] | None = None) -> str:
+        """'Inbox', a well-known name, an id, a top-level display name, or a path 'Parent/Child' -> the folder id.
+        With `created` (a list), missing folders along the path are created and their paths appended to it."""
         parts = [p for p in (folder or "Inbox").split("/") if p] or ["Inbox"]
         try:
             current = graph.get(f"/me/mailFolders/{quote(parts[0].replace(' ', ''), safe='')}")["id"]
         except GraphError as e:
             match e.code:
                 case "not_found" | "graph_error":   # 404, or 400 for a name that is not well-known: look it up by name
-                    current = self._child(graph, None, parts[0])
+                    current = self._child(graph, None, parts[0], created, parts[0])
                 case _:
                     raise
-        for name in parts[1:]:
-            current = self._child(graph, current, name)
+        for i, name in enumerate(parts[1:], 2):
+            current = self._child(graph, current, name, created, "/".join(parts[:i]))
         return current
 
     @staticmethod
-    def _child(graph, parent: str | None, name: str) -> str:
-        path = f"/me/mailFolders/{parent}/childFolders" if parent else "/me/mailFolders"
-        for f in graph.get(path, {"$top": "100"}).get("value", []):
+    def _child(graph, parent: str | None, name: str, created: list[str] | None = None, path: str = "") -> str:
+        folders = f"/me/mailFolders/{parent}/childFolders" if parent else "/me/mailFolders"
+        for f in graph.get(folders, {"$top": "100"}).get("value", []):
             if f["displayName"].lower() == name.lower():
                 return f["id"]
-        raise GraphError("unknown_folder", name)
+        if created is None:
+            raise GraphError("unknown_folder", name)
+        created.append(path)
+        return graph.post(folders, {"displayName": name})["id"]
 
     # queue ---------------------------------------------------------------------------
     def _refresh_queue(self, graph, key: str, scope: str, folder_id: str, filters: Filters) -> None:
@@ -228,6 +234,36 @@ class MailService:
                 for c in graph.get(f"/me/mailFolders/{f['id']}/childFolders", {"$top": "100"}).get("value", []):
                     out.append({"id": c["id"], "name": c["displayName"], "path": f"{f['displayName']}/{c['displayName']}"})
             return {"folders": out}                       # an object: MCP structured results are objects
+        except Exception as e:
+            return self._failure(e)
+
+    def move_mail(self, key: str, args: dict) -> dict:
+        """File an email into a folder (created, with its parents, when missing). The id stays the same."""
+        mid, folder = str(args.get("mail_id") or "").strip(), str(args.get("folder") or "").strip()
+        if not mid or not folder:
+            return {"error": "invalid_argument", "message": "mail_id and folder are required"}
+        try:
+            graph, created = self._graph(key), []
+            dest = self._folder_id(graph, folder, created)
+            graph.post(f"/me/messages/{quote(mid, safe='')}/move", {"destinationId": dest})
+            return {"id": mid, "folder": folder, "created": created}
+        except Exception as e:
+            return self._failure(e)
+
+    def forward_mail(self, key: str, args: dict) -> dict:
+        """Forward an email, with an optional note above it, to one or more addresses."""
+        mid = str(args.get("mail_id") or "").strip()
+        to = args.get("to") or []
+        to = [str(a).strip() for a in (to.replace(";", ",").split(",") if isinstance(to, str) else to) if str(a).strip()]
+        bad = [a for a in to if not EMAIL.fullmatch(a)]
+        if not mid or not to or bad:
+            return {"error": "invalid_argument",
+                    "message": f"not an email address: {', '.join(bad)}" if bad else "mail_id and to are required"}
+        try:
+            self._graph(key).post(f"/me/messages/{quote(mid, safe='')}/forward", {
+                "comment": str(args.get("comment") or ""),
+                "toRecipients": [{"emailAddress": {"address": a}} for a in to]})
+            return {"id": mid, "forwarded_to": to}
         except Exception as e:
             return self._failure(e)
 

@@ -20,6 +20,9 @@ FOLDERS = [{"id": "inbox-id", "displayName": "Inbox", "wellKnown": "inbox"},
 class FakeGraph:
     def __init__(self):
         self.requests: list[tuple[str, str]] = []
+        self.posted: list[tuple[str, dict]] = []  # (path, JSON body) of each POST to Graph
+        self.folders = [dict(f) for f in FOLDERS]  # move_mail may create folders
+        self.forbid_writes = False                # a connection consented before Mail.ReadWrite/Mail.Send: 403
         self.headers: list[dict[str, str]] = []   # each request's headers, in the order of .requests
         self.messages: dict[str, dict] = {}       # id -> message (with folder, seq)
         self.removed: list[tuple[int, str, str]] = []   # (seq, folder, id)
@@ -71,9 +74,11 @@ class FakeGraph:
         self.access_tokens.clear()
 
     # transport -------------------------------------------------------------------
-    @staticmethod
-    def _folder_id(name_or_id: str) -> str:
-        for f in FOLDERS:
+    def folder(self, fid: str) -> dict | None:
+        return next((f for f in self.folders if f["id"] == fid), None)
+
+    def _folder_id(self, name_or_id: str) -> str:
+        for f in self.folders:
             if name_or_id in (f["id"], f.get("wellKnown"), f["displayName"]):
                 return f["id"]
         return name_or_id
@@ -105,7 +110,10 @@ class FakeGraph:
             return httpx.Response(429, headers={"Retry-After": "2"}, json={"error": {"code": "TooManyRequests"}})
         if request.headers.get("Authorization", "").removeprefix("Bearer ") not in self.access_tokens:
             return httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken"}})
-        return self._graph(url.path.split("/v1.0", 1)[-1], parse_qs(url.query))
+        path = url.path.split("/v1.0", 1)[-1]
+        if request.method == "POST":
+            return self._post(path, json.loads(request.content or b"{}"))
+        return self._graph(path, parse_qs(url.query))
 
     def _token(self, form: dict) -> httpx.Response:
         match form.get("grant_type", [""])[0]:
@@ -134,15 +142,15 @@ class FakeGraph:
             case ["me"]:
                 return httpx.Response(200, json={"mail": self.account, "userPrincipalName": self.account})
             case ["me", "mailFolders"]:
-                return httpx.Response(200, json={"value": [f for f in FOLDERS if "parent" not in f]})
+                return httpx.Response(200, json={"value": [f for f in self.folders if "parent" not in f]})
             case ["me", "mailFolders", fid, "childFolders"]:
-                return httpx.Response(200, json={"value": [f for f in FOLDERS if f.get("parent") == self._folder_id(fid)]})
+                return httpx.Response(200, json={"value": [f for f in self.folders if f.get("parent") == self._folder_id(fid)]})
             case ["me", "mailFolders", fid] if self.folder_name_status and any(
-                    fid == f["displayName"] and fid not in (f["id"], f.get("wellKnown")) for f in FOLDERS):
+                    fid == f["displayName"] and fid not in (f["id"], f.get("wellKnown")) for f in self.folders):
                 return httpx.Response(self.folder_name_status, json={"error": {"code": "ErrorInvalidIdMalformed"}})
             case ["me", "mailFolders", fid]:
                 fid = self._folder_id(fid)
-                f = next((f for f in FOLDERS if f["id"] == fid), None)
+                f = self.folder(fid)
                 return httpx.Response(200, json=f) if f else httpx.Response(404, json={"error": {"code": "ErrorFolderNotFound"}})
             case ["me", "mailFolders", fid, "messages", "delta"]:
                 return self._delta(self._folder_id(fid), q)
@@ -155,6 +163,30 @@ class FakeGraph:
             case ["me", "messages", mid]:
                 m = self.messages.get(mid)
                 return httpx.Response(200, json=m) if m else httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
+        return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
+
+    def _post(self, path: str, body: dict) -> httpx.Response:
+        self.posted.append((path, body))
+        if self.forbid_writes:
+            return httpx.Response(403, json={"error": {"code": "ErrorAccessDenied", "message": "Access is denied."}})
+        match path.strip("/").split("/"):
+            case ["me", "messages", mid, "move"]:
+                m, dest = self.messages.get(mid), self.folder(self._folder_id(body.get("destinationId", "")))
+                if m is None or dest is None:
+                    return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
+                self.removed.append((next(self._seq), m["folder"], mid))   # the source folder's delta: gone
+                m["folder"], m["seq"] = dest["id"], next(self._seq)        # immutable id: same id after the move
+                return httpx.Response(201, json=m)
+            case ["me", "messages", mid, "forward"]:
+                if mid not in self.messages:
+                    return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
+                return httpx.Response(202)
+            case ["me", "mailFolders"] | ["me", "mailFolders", _, "childFolders"] as parts:
+                f = {"id": f"folder-{next(self._seq)}", "displayName": body["displayName"]}
+                if len(parts) == 4:
+                    f["parent"] = self._folder_id(parts[2])
+                self.folders.append(f)
+                return httpx.Response(201, json=f)
         return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
 
     def _delta(self, fid: str, q: dict) -> httpx.Response:

@@ -18,7 +18,8 @@ def test_initialize_and_tools_list(tmp_path):
     init = rpc(c, "initialize")
     assert init["result"]["serverInfo"]["name"] == "outlook"
     names = [t["name"] for t in rpc(c, "tools/list")["result"]["tools"]]
-    assert names == ["connect_start", "connect_status", "whoami", "list_folders", "poll_new_mail", "get_attachment"]
+    assert names == ["connect_start", "connect_status", "whoami", "list_folders", "poll_new_mail", "get_attachment",
+                     "move_mail", "forward_mail"]
 
 
 def test_get_attachment_description_carries_the_triage_rule():

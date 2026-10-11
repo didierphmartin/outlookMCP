@@ -24,7 +24,7 @@ class AppConfig:
     fake_graph: bool = False
     fake_seed: str = ""                 # JSON file of messages for fake mode
 
-    SCOPES: ClassVar[str] = "openid profile offline_access User.Read Mail.Read"
+    SCOPES: ClassVar[str] = "openid profile offline_access User.Read Mail.ReadWrite Mail.Send"
 
     @staticmethod
     def new_secret_key() -> str:

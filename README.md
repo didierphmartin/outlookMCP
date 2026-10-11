@@ -5,8 +5,9 @@ Outlook.com mailbox through Microsoft Graph. A user connects a mailbox once (dev
 browser redirect where device code is blocked); the server keeps an encrypted refresh token in a local
 SQLite file and hands the app a **connection key**, which the app sends as the `X-Outlook-Account`
 header. The main tool, `poll_new_mail`, returns the next unseen email in a folder, oldest first, one per
-call and never the same email twice, so a workflow's "Poll Outlook" code node can run on a cron. The
-server only reads mail (`Mail.Read`): it never sends, moves or deletes anything.
+call and never the same email twice, so a workflow's "Poll Outlook" code node can run on a cron. After
+triage, `move_mail` files an email into a folder and `forward_mail` sends it on to other addresses
+(`Mail.ReadWrite`, `Mail.Send`). The server never deletes anything.
 
 ## 1. Microsoft app registration
 
@@ -17,8 +18,11 @@ One Entra ID app registration serves every user and every tenant.
    directory and personal Microsoft accounts*. Leave the redirect URI empty for now. Register.
 3. Copy the **Application (client) ID** into `OUTLOOK_CLIENT_ID`.
 4. **Authentication → Settings** tab → **Allow public client flows: Yes.** Save.
-5. **API permissions → Add a permission → Microsoft Graph → Delegated permissions:** `Mail.Read`,
-   `User.Read`, `offline_access`.
+5. **API permissions → Add a permission → Microsoft Graph → Delegated permissions:** `Mail.ReadWrite`
+   (read and move), `Mail.Send` (forward), `User.Read`, `offline_access`. A registration made for an
+   earlier version (with `Mail.Read` only) needs the two added and, on a work tenant, admin consent
+   granted again; every mailbox connected before that must **connect again**, because its sign-in
+   carries the old permissions (`move_mail` and `forward_mail` then answer `forbidden`).
 6. Optional, for the browser sign-in fallback: **Authentication → Add a platform → Mobile and desktop
    applications**, redirect URI `<OUTLOOK_PUBLIC_URL>/auth/callback`
    (e.g. `https://synergy.example.com/outlook/auth/callback` or `http://localhost:8770/auth/callback`).
@@ -92,13 +96,17 @@ as the server row's `X-Outlook-Account` header. Two mailboxes = two server rows.
 | `list_folders` | — | `{folders: [{id, name, path}]}` |
 | `poll_new_mail` | `{folder, from?, subject_contains?, has_attachments?}` | `{mail: {id, from, to, cc, subject, received_at, body_text, web_link, attachments} \| null}` |
 | `get_attachment` | `{mail_id, attachment_id}` | `{name, content_type, size, text?, base64?}` |
+| `move_mail` | `{mail_id, folder}` | `{id, folder, created}`; files the email into `folder` (a name or path such as `Dispatched/Sales`), creating missing folders along the path (`created` lists them). The id does not change. Do not move mail into the folder `poll_new_mail` watches: it would come back as new. |
+| `forward_mail` | `{mail_id, to, comment?}` | `{id, forwarded_to}`; forwards the email with its attachments from the connected mailbox. `to` is a list or one string separated by `,` or `;`. Graph has no per-message *redirect* (keeping the original sender): this is a forward. |
 
 Every tool publishes its result's JSON Schema (`outputSchema` in `tools/list`). A success carries the
 result as `structuredContent`, and the same JSON as text for clients that read `content` only.
 
 The mailbox tools need the `X-Outlook-Account` header. Every failure is an MCP tool error
 (`isError: true`) whose text is `{"error": code, "message": ...}`, e.g. `not_connected`,
-`reconnect_needed` (sign in again), `throttled`, `network_error`, `unknown_folder`, `too_large`.
+`reconnect_needed` (sign in again), `forbidden` (the sign-in lacks `Mail.ReadWrite` or `Mail.Send`:
+grant it, then connect again), `invalid_argument`, `throttled`, `network_error`, `unknown_folder`,
+`too_large`.
 
 `poll_new_mail` starts a connection's first folder + filter set at the **sign-in** (mail sent after
 Connect counts, even before the first poll; older mail is not replayed), and any later folder + filter

@@ -18,7 +18,8 @@ PROTOCOL_VERSION = "2025-06-18"
 _FOLDER = {"type": "string", "description": "Folder name or path, e.g. 'Inbox' or 'Inbox/Invoices'. Default Inbox."}
 # The mailbox tools fail as MCP tool errors (isError); the error text is the JSON object below.
 _FAILS = (" On failure: a tool error (isError) whose text is {\"error\": code, \"message\": ...}; codes include "
-          "not_connected, reconnect_needed, throttled, not_found, unknown_folder, network_error, graph_error, internal_error.")
+          "not_connected, reconnect_needed, throttled, not_found, unknown_folder, forbidden, network_error, graph_error, "
+          "internal_error.")
 _STR = {"type": "string"}
 _ATTACHMENT = {"type": "object", "properties": {"id": _STR, "name": _STR, "content_type": _STR,
                                                 "size": {"type": "integer", "description": "Bytes"}},
@@ -93,6 +94,33 @@ TOOLS = [
          "text": {"type": "string", "description": "The content as text, when convertible"},
          "base64": {"type": "string", "description": "The raw content, when not convertible to text"}},
          "required": ["name", "content_type", "size"]}},
+    {"name": "move_mail",
+     "description": ("File an email into a folder, e.g. 'Dispatched/Sales'. Missing folders along the path are created. "
+                     "The email keeps its id, so later steps (get_attachment, forward_mail) still work. Do not move mail "
+                     "into the folder poll_new_mail watches: it would come back as new. Extra error code: invalid_argument."
+                     + _FAILS),
+     "inputSchema": {"type": "object", "properties": {
+         "mail_id": {"type": "string", "description": "poll_new_mail's mail.id"},
+         "folder": {"type": "string", "description": "Destination folder name or path, e.g. 'Archive' or 'Dispatched/Sales'"}},
+         "required": ["mail_id", "folder"]},
+     "outputSchema": {"type": "object", "properties": {
+         "id": {"type": "string", "description": "The email's id (unchanged by the move)"},
+         "folder": {"type": "string", "description": "The destination, as given"},
+         "created": {"type": "array", "items": _STR, "description": "Folder paths this move created"}},
+         "required": ["id", "folder", "created"]}},
+    {"name": "forward_mail",
+     "description": ("Forward an email, attachments included, to one or more addresses, with an optional note above it. "
+                     "It is sent from the connected mailbox. Extra error code: invalid_argument." + _FAILS),
+     "inputSchema": {"type": "object", "properties": {
+         "mail_id": {"type": "string", "description": "poll_new_mail's mail.id"},
+         "to": {"type": ["string", "array"], "items": _STR,
+                "description": "Address(es): a list, or one string separated by commas or semicolons"},
+         "comment": {"type": "string", "description": "A note placed above the forwarded email"}},
+         "required": ["mail_id", "to"]},
+     "outputSchema": {"type": "object", "properties": {
+         "id": {"type": "string", "description": "The forwarded email's id"},
+         "forwarded_to": {"type": "array", "items": _STR, "description": "The addresses it went to"}},
+         "required": ["id", "forwarded_to"]}},
 ]
 
 
@@ -142,7 +170,7 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
                 return connector.start(args.get("method") or "device")
             case "connect_status":
                 return connector.status(str(args.get("connect_id") or ""))
-            case "whoami" | "list_folders" | "poll_new_mail" | "get_attachment":
+            case "whoami" | "list_folders" | "poll_new_mail" | "get_attachment" | "move_mail" | "forward_mail":
                 if not account_key:
                     return {"error": "not_connected", "message": f"missing {CREDENTIAL_HEADER} header: connect the mailbox first"}
                 if store.connection(account_key) is None:

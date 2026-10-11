@@ -68,6 +68,8 @@ def test_every_tool_result_matches_its_output_schema(fake, http, cfg):
     assert mail["subject"] == "Invoice" and mail["attachments"][0]["name"] == "a.txt"
     att = success(c, "get_attachment", {"mail_id": mail["id"], "attachment_id": mail["attachments"][0]["id"]}, key=key)
     assert att["text"].strip() == "hello"
+    assert success(c, "forward_mail", {"mail_id": mail["id"], "to": "a@x.com"}, key=key)["forwarded_to"] == ["a@x.com"]
+    assert success(c, "move_mail", {"mail_id": mail["id"], "folder": "Done/2026"}, key=key)["created"] == ["Done", "Done/2026"]
 
 
 def test_failures_are_tool_errors_carrying_code_and_message(fake, http, cfg):

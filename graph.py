@@ -12,7 +12,8 @@ PREFER_IMMUTABLE_IDS = 'IdType="ImmutableId"'   # a message keeps its id when it
 
 class GraphError(Exception):
     """A Graph failure the tools report as {"error": code}: reconnect_needed, throttled, not_found, network_error,
-    sync_state_lost (a delta link Graph no longer honours), graph_error (with the HTTP status)."""
+    forbidden (the sign-in lacks a permission), sync_state_lost (a delta link Graph no longer honours),
+    graph_error (with the HTTP status)."""
 
     def __init__(self, code: str, message: str = "", status: int = 0):
         super().__init__(f"{code}: {message}" if message else code)
@@ -82,15 +83,15 @@ class GraphClient:
     def __init__(self, http: httpx.Client, base: str, tokens, sleep=time.sleep):
         self.http, self.base, self.tokens, self.sleep = http, base.rstrip("/"), tokens, sleep
 
-    def _send(self, path_or_url: str, params: dict | None) -> httpx.Response:
+    def _send(self, path_or_url: str, params: dict | None, method: str = "GET", body: dict | None = None) -> httpx.Response:
         url = path_or_url if path_or_url.startswith("http") else self.base + path_or_url
         force = False
         for attempt in range(2):
-            r = self.http.get(url, params=params, timeout=30,
-                              headers={"Authorization": "Bearer " + self.tokens.access_token(force=force),
-                                       "Prefer": PREFER_IMMUTABLE_IDS})
+            r = self.http.request(method, url, params=params, json=body, timeout=30,
+                                  headers={"Authorization": "Bearer " + self.tokens.access_token(force=force),
+                                           "Prefer": PREFER_IMMUTABLE_IDS})
             match r.status_code:
-                case 200:
+                case 200 | 201 | 202 | 204:
                     return r
                 case 401 if attempt == 0:
                     force = True
@@ -100,6 +101,9 @@ class GraphClient:
                     self.sleep(min(float(r.headers.get("Retry-After", "1")), MAX_RETRY_AFTER_S))
                 case 429:
                     raise GraphError("throttled", "Microsoft Graph is throttling this mailbox; try again later")
+                case 403:
+                    raise GraphError("forbidden", "the sign-in lacks a permission (Mail.ReadWrite to move, Mail.Send "
+                                                  "to forward): grant it in Entra, then connect the mailbox again")
                 case 404:
                     raise GraphError("not_found", url)
                 case 410 | 400 if self._sync_state_lost(r):
@@ -121,3 +125,8 @@ class GraphClient:
 
     def get_bytes(self, path_or_url: str) -> bytes:
         return self._send(path_or_url, None).content
+
+    def post(self, path: str, body: dict) -> dict:
+        """A write; {} when Graph answers without a body (202 Accepted for a forward)."""
+        r = self._send(path, None, "POST", body)
+        return r.json() if r.content else {}
