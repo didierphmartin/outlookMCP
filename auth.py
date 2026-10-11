@@ -106,8 +106,11 @@ class Connector:
         connect_id = secrets.token_urlsafe(16)
         self.store.create_connect(connect_id, {"device_code": d["device_code"], "interval": int(d.get("interval", 5)),
                                                "last_poll": 0.0}, expires_at=self.clock() + int(d["expires_in"]))
-        return {"connect_id": connect_id, "verification_uri": d["verification_uri"], "user_code": d["user_code"],
-                "expires_in": int(d["expires_in"])}
+        out = {"connect_id": connect_id, "verification_uri": d["verification_uri"], "user_code": d["user_code"],
+               "expires_in": int(d["expires_in"])}
+        if self.cfg.public_url:     # offered up front: a tenant may refuse the code on Microsoft's page without telling us
+            out["redirect_url"] = self._start_url(connect_id)
+        return out
 
     def status(self, connect_id: str) -> dict:
         row = self.store.connect(connect_id)

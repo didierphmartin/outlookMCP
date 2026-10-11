@@ -37,13 +37,15 @@ _MAIL = {"type": ["object", "null"], "description": "The email, or null when no 
          "required": ["id", "from", "to", "cc", "subject", "received_at", "body_text", "web_link", "attachments"]}
 TOOLS = [
     {"name": "connect_start",
-     "description": "Start connecting a mailbox. Returns a code the user enters at verification_uri (device sign-in).",
+     "description": ("Start connecting a mailbox. Returns a code the user enters at verification_uri (device sign-in); "
+                     "when the server has a public URL, also redirect_url: a browser sign-in for the same connect_id."),
      "inputSchema": {"type": "object", "properties": {"method": {"type": "string", "enum": ["device"]}}},
      "outputSchema": {"type": "object", "properties": {
          "connect_id": {"type": "string", "description": "Pass to connect_status"},
          "verification_uri": {"type": "string", "description": "The sign-in page"},
          "user_code": {"type": "string", "description": "The code to enter there"},
-         "expires_in": {"type": "integer", "description": "Seconds the code stays valid"}},
+         "expires_in": {"type": "integer", "description": "Seconds the code stays valid"},
+         "redirect_url": {"type": "string", "description": "A browser sign-in to use instead of the code (only with a public URL)"}},
          "required": ["connect_id", "verification_uri", "user_code", "expires_in"]}},
     {"name": "connect_status",
      "description": ("Status of a connect_start: pending, connected (with connection_key, once), expired, denied, "

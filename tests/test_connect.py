@@ -316,3 +316,12 @@ def test_late_device_failure_does_not_hide_a_concurrent_connect(fake, http, cfg,
     c.store.save_connection("key-9", "me@contoso.com", "tid-1", "RT")
     st = c.status(s["connect_id"])
     assert st["status"] == "connected" and st["connection_key"] == "key-9"
+
+
+def test_start_offers_the_browser_sign_in_from_the_outset(fake, http, cfg):
+    c, t = connector(fake, http, cfg)
+    s = c.start()
+    assert s["redirect_url"] == f"{cfg.public_url}/auth/start?connect_id={s['connect_id']}"
+    assert urlparse(c.redirect_start(s["connect_id"])).path.endswith("/oauth2/v2.0/authorize")   # while the code is pending
+    plain, _ = connector(fake, http, replace(cfg, public_url=""))
+    assert "redirect_url" not in plain.start()

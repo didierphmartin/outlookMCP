@@ -86,7 +86,7 @@ as the server row's `X-Outlook-Account` header. Two mailboxes = two server rows.
 
 | Tool | Input | Output |
 |---|---|---|
-| `connect_start` | `{method?: "device"}` | `{connect_id, verification_uri, user_code, expires_in}` |
+| `connect_start` | `{method?: "device"}` | `{connect_id, verification_uri, user_code, expires_in, redirect_url?}`; with `OUTLOOK_PUBLIC_URL`, `redirect_url` is a browser sign-in for the same `connect_id`, offered from the start because a tenant can refuse the code on Microsoft's page without the device poll ever saying so. |
 | `connect_status` | `{connect_id}` | `{status, account?, connection_key?, message?, redirect_url?}`; status is `pending`, `connected`, `expired`, `denied`, `policy_blocked`, `failed` (+ `message`) or `unknown` (no such `connect_id`, e.g. a typo or another server's database). With `OUTLOOK_PUBLIC_URL`, `policy_blocked`, `expired`, `denied` and `failed` add `redirect_url` (browser sign-in). The key is returned once. |
 | `whoami` | — | `{account, tenant, connected_at}`, once Microsoft has confirmed the sign-in still works (a refused sign-in is `reconnect_needed`) |
 | `list_folders` | — | `{folders: [{id, name, path}]}` |
