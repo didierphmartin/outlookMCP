@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import httpx
 import pytest
 
@@ -31,7 +33,8 @@ def svc(fake, http, cfg):
     from graph import GraphClient, TokenSource
     from mail import MailService
     from store import Store
-    store = Store(cfg.db_path, cfg.secret_key)
+    signed_in = datetime.fromisoformat(NOW.replace("Z", "+00:00")).timestamp()
+    store = Store(cfg.db_path, cfg.secret_key, clock=lambda: signed_in)   # the sign-in happens at NOW
     store.save_connection("key-1", fake.account, fake.tenant, fake._tokens_response().json()["refresh_token"])
     graph_for = lambda key: GraphClient(http, cfg.graph_base, TokenSource(Auth(http, cfg), store, key))
     return MailService(graph_for, store, cfg, now_iso=lambda: NOW)

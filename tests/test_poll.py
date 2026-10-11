@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import httpx
 import pytest
 
@@ -15,6 +17,17 @@ def poll(svc, **args):
 def test_old_mail_is_not_replayed(fake, svc):
     fake.add_message(subject="old", received="2026-10-07T09:00:00Z")
     assert poll(svc) == {"mail": None}
+
+
+def test_mail_sent_after_sign_in_counts_before_the_first_poll(fake, svc):
+    # Sign-in at NOW (10:00), first poll at 12:00: mail of 10:30 is new; mail before the sign-in is not.
+    later = MailService(svc.graph_for, svc.store, svc.cfg, now_iso=lambda: "2026-10-07T12:00:00Z")
+    fake.add_message(subject="before sign-in", received="2026-10-07T09:59:00Z")
+    fake.add_message(subject="test 5", received="2026-10-07T10:30:00Z")
+    assert later.poll_new_mail("key-1", {"folder": "Inbox"})["mail"]["subject"] == "test 5"
+    assert later.poll_new_mail("key-1", {"folder": "Inbox"}) == {"mail": None}
+    # A second folder + filter set of the same connection starts at its own first poll: nothing replayed.
+    assert later.poll_new_mail("key-1", {"folder": "Inbox", "subject_contains": "test"}) == {"mail": None}
 
 
 def test_one_per_call_oldest_first_never_twice(fake, svc):
@@ -167,7 +180,8 @@ def make_svc(fake, cfg, http, store, slept=None):
 
 @pytest.fixture
 def store(fake, cfg):
-    s = Store(cfg.db_path, cfg.secret_key)
+    signed_in = datetime.fromisoformat(NOW.replace("Z", "+00:00")).timestamp()
+    s = Store(cfg.db_path, cfg.secret_key, clock=lambda: signed_in)   # the sign-in happens at NOW
     s.save_connection("key-1", fake.account, fake.tenant, fake._tokens_response().json()["refresh_token"])
     return s
 

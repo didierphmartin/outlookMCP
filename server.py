@@ -10,10 +10,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 
+from auth import CREDENTIAL_HEADER
 from config import AppConfig
 
 PROTOCOL_VERSION = "2025-06-18"
-ACCOUNT_HEADER = "x-outlook-account"
 
 _FOLDER = {"type": "string", "description": "Folder name or path, e.g. 'Inbox' or 'Inbox/Invoices'. Default Inbox."}
 # The mailbox tools fail as MCP tool errors (isError); the error text is the JSON object below.
@@ -144,7 +144,7 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
                 return connector.status(str(args.get("connect_id") or ""))
             case "whoami" | "list_folders" | "poll_new_mail" | "get_attachment":
                 if not account_key:
-                    return {"error": "not_connected", "message": "missing X-Outlook-Account header: connect the mailbox first"}
+                    return {"error": "not_connected", "message": f"missing {CREDENTIAL_HEADER} header: connect the mailbox first"}
                 if store.connection(account_key) is None:
                     return {"error": "reconnect_needed", "message": "unknown or removed connection"}
                 return getattr(mail, name)(account_key, args)
@@ -186,7 +186,7 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
                 # Tools block (sync httpx, up to 10 s Retry-After): a worker thread, so one slow mailbox
                 # does not stall every other call on the event loop.
                 payload = await run_in_threadpool(call_tool, params.get("name") or "", params.get("arguments") or {},
-                                                  request.headers.get(ACCOUNT_HEADER, ""))
+                                                  request.headers.get(CREDENTIAL_HEADER, ""))
                 if payload is None:
                     return err(req_id, -32601, f"unknown tool '{params.get('name')}'")
                 return ok(req_id, _wrap(payload))

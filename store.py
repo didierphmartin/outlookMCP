@@ -128,6 +128,10 @@ class Store:
                         (self.key_id(connection_key), scope))
         return {"delta_link": row[0], "since": row[1]} if row else None
 
+    def has_cursor(self, connection_key: str) -> bool:
+        """Has this connection polled any folder + filter set yet?"""
+        return self._one("SELECT 1 FROM cursors WHERE key_id = ? LIMIT 1", (self.key_id(connection_key),)) is not None
+
     def save_cursor(self, connection_key: str, scope: str, delta_link: str | None, since: str) -> None:
         """delta_link None: `since` is fixed but no delta round has completed yet."""
         self._x("INSERT OR REPLACE INTO cursors VALUES (?, ?, ?, ?)",

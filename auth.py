@@ -12,6 +12,9 @@ import httpx
 
 from config import AppConfig
 
+# The request header that carries a connection key; connect_status names it so the app stores the key there.
+CREDENTIAL_HEADER = "X-Outlook-Account"
+
 
 class AuthError(Exception):
     def __init__(self, code: str, description: str = ""):
@@ -203,7 +206,8 @@ class Connector:
         key = self.store.take_connection_key(connect_id)
         if key is None:
             return {"status": "connected"}
-        return {"status": "connected", "account": self.store.connection(key)["account"], "connection_key": key}
+        return {"status": "connected", "account": self.store.connection(key)["account"], "connection_key": key,
+                "credential_header": CREDENTIAL_HEADER}
 
     # redirect fallback (PKCE) ------------------------------------------------------
     def _redirect_uri(self) -> str:

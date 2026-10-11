@@ -78,6 +78,11 @@ class MailService:
     def utc_now() -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    @staticmethod
+    def iso(epoch: float) -> str:
+        """A stored clock reading (epoch seconds) in Graph's receivedDateTime form."""
+        return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     def _graph(self, key: str):
         with self._graphs_lock:
             if key not in self._graphs:
@@ -113,8 +118,12 @@ class MailService:
         """Read the folder's delta since the cursor and queue the matching new messages. The queue (not the
         delta order) decides delivery order; re-sent (changed) messages are already queued and stay ignored."""
         cur = self.store.cursor(key, scope)
-        if cur is None:                             # first use: "now", saved before Graph is asked, so a failed
-            cur = {"delta_link": None, "since": self.now_iso()}   # first round does not move it forward
+        if cur is None:
+            # First use of this folder + filter set. The connection's first one starts at the sign-in, so mail
+            # sent after Connect counts; a later one starts "now", so a changed filter replays nothing.
+            # Saved before Graph is asked, so a failed first round does not move it forward.
+            first = not self.store.has_cursor(key)
+            cur = {"delta_link": None, "since": self.iso(self.store.connection(key)["connected_at"]) if first else self.now_iso()}
             self.store.save_cursor(key, scope, None, cur["since"])
         since = cur["since"]
         fresh = (f"/me/mailFolders/{folder_id}/messages/delta",

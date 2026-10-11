@@ -66,8 +66,8 @@ cp .env.example .env          # then fill in the values
 Changing `OUTLOOK_SECRET_KEY` later makes every stored sign-in unreadable: the mailbox tools then
 answer `reconnect_needed`.
 
-**Keep this machine's clock NTP-synced.** On the first poll of a folder + filter set, "now" (the
-point from which mail counts as new) is taken from this server's clock and compared with Graph's
+**Keep this machine's clock NTP-synced.** The point from which mail counts as new (the sign-in, or
+"now" for a later folder + filter set) is taken from this server's clock and compared with Graph's
 `receivedDateTime`: a clock running ahead silently skips mail received in between.
 
 ## 4. Register in SynergyAI
@@ -87,7 +87,7 @@ as the server row's `X-Outlook-Account` header. Two mailboxes = two server rows.
 | Tool | Input | Output |
 |---|---|---|
 | `connect_start` | `{method?: "device"}` | `{connect_id, verification_uri, user_code, expires_in, redirect_url?}`; with `OUTLOOK_PUBLIC_URL`, `redirect_url` is a browser sign-in for the same `connect_id`, offered from the start because a tenant can refuse the code on Microsoft's page without the device poll ever saying so. |
-| `connect_status` | `{connect_id}` | `{status, account?, connection_key?, message?, redirect_url?}`; status is `pending`, `connected`, `expired`, `denied`, `policy_blocked`, `failed` (+ `message`) or `unknown` (no such `connect_id`, e.g. a typo or another server's database). With `OUTLOOK_PUBLIC_URL`, `policy_blocked`, `expired`, `denied` and `failed` add `redirect_url` (browser sign-in). The key is returned once. |
+| `connect_status` | `{connect_id}` | `{status, account?, connection_key?, credential_header?, message?, redirect_url?}`; status is `pending`, `connected`, `expired`, `denied`, `policy_blocked`, `failed` (+ `message`) or `unknown` (no such `connect_id`, e.g. a typo or another server's database). With `OUTLOOK_PUBLIC_URL`, `policy_blocked`, `expired`, `denied` and `failed` add `redirect_url` (browser sign-in). The key is returned once, with `credential_header` (`X-Outlook-Account`): the header the app must send it in. |
 | `whoami` | — | `{account, tenant, connected_at}`, once Microsoft has confirmed the sign-in still works (a refused sign-in is `reconnect_needed`) |
 | `list_folders` | — | `{folders: [{id, name, path}]}` |
 | `poll_new_mail` | `{folder, from?, subject_contains?, has_attachments?}` | `{mail: {id, from, to, cc, subject, received_at, body_text, web_link, attachments} \| null}` |
@@ -100,8 +100,9 @@ The mailbox tools need the `X-Outlook-Account` header. Every failure is an MCP t
 (`isError: true`) whose text is `{"error": code, "message": ...}`, e.g. `not_connected`,
 `reconnect_needed` (sign in again), `throttled`, `network_error`, `unknown_folder`, `too_large`.
 
-`poll_new_mail` starts its cursor at **now** (this server's clock) on first use of a folder + filter
-set (old mail is not replayed), and remembers what it delivered across restarts. If Graph drops the
+`poll_new_mail` starts a connection's first folder + filter set at the **sign-in** (mail sent after
+Connect counts, even before the first poll; older mail is not replayed), and any later folder + filter
+set at **now** (a changed filter replays nothing), and remembers what it delivered across restarts. If Graph drops the
 delta state (410 Gone / SyncState errors), the server starts the folder's delta again from that same
 starting point; already delivered mail is not delivered again. Message ids are immutable ids, so a
 mail keeps its id when it is moved to another folder. `mail` is

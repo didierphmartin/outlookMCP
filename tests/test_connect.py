@@ -24,6 +24,7 @@ def test_device_flow_end_to_end(fake, http, cfg):
     assert done["status"] == "connected" and done["account"] == "me@contoso.com"
     key = done["connection_key"]
     assert len(key) >= 32
+    assert done["credential_header"] == "X-Outlook-Account"      # the app stores the key under the header the server names
     again = c.status(s["connect_id"])
     assert again["status"] == "connected" and "connection_key" not in again   # handed out once
     assert Store(cfg.db_path, cfg.secret_key).connection(key)["tenant"] == "tid-1"
