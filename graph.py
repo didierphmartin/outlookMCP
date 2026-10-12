@@ -130,3 +130,10 @@ class GraphClient:
         """A write; {} when Graph answers without a body (202 Accepted for a forward)."""
         r = self._send(path, None, "POST", body)
         return r.json() if r.content else {}
+
+    def patch(self, path: str, body: dict) -> dict:
+        r = self._send(path, None, "PATCH", body)
+        return r.json() if r.content else {}
+
+    def delete(self, path: str) -> None:
+        self._send(path, None, "DELETE")

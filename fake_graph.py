@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import time
 from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
@@ -40,6 +41,12 @@ class FakeGraph:
         # The next delta request made from a delta link answers this status: 410 (SyncStateNotFound) or
         # 400 (SyncStateInvalid), as real Graph does when a delta link is too old or its sync state is gone.
         self.delta_link_failure: int | None = None
+        # Change subscriptions: id -> {resource, clientState, expirationDateTime, folder}. A new message in a
+        # subscribed folder calls on_notification with Graph's body, as the Event Hub listener would.
+        self.subscriptions: dict[str, dict] = {}
+        self.on_notification = None
+        self.subscription_status: int | None = None   # POST /subscriptions answers this error status instead
+        self.clock = time.time                         # "now" for the subscription expiry limit
 
     # test controls -------------------------------------------------------------
     def add_message(self, folder="inbox", subject="", sender="a@b.c", received="2026-10-07T10:00:00Z",
@@ -57,7 +64,23 @@ class FakeGraph:
                               "receivedDateTime": received, "hasAttachments": bool(atts),
                               "body": {"contentType": "html", "content": body_html},
                               "webLink": f"https://outlook.office.com/mail/id/{mid}", "attachments": atts}
+        self._notify(mid)
         return mid
+
+    def _notify(self, mid: str) -> None:
+        folder = self.messages[mid]["folder"]
+        for sid, sub in list(self.subscriptions.items()):
+            if sub["folder"] == folder and self.on_notification:
+                self.on_notification({"value": [{"subscriptionId": sid, "clientState": sub["clientState"],
+                                                 "changeType": "created", "tenantId": self.tenant,
+                                                 "resource": f"Users/u1/Messages/{mid}"}]})
+
+    def lifecycle(self, sid: str, event: str, remove: bool = False) -> None:
+        """Graph's lifecycle notification for a subscription (reauthorizationRequired, subscriptionRemoved, missed)."""
+        sub = self.subscriptions.pop(sid) if remove else self.subscriptions[sid]
+        if self.on_notification:
+            self.on_notification({"value": [{"subscriptionId": sid, "clientState": sub["clientState"],
+                                             "lifecycleEvent": event, "tenantId": self.tenant}]})
 
     def remove_message(self, mid: str) -> None:
         m = self.messages.pop(mid)
@@ -111,9 +134,43 @@ class FakeGraph:
         if request.headers.get("Authorization", "").removeprefix("Bearer ") not in self.access_tokens:
             return httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken"}})
         path = url.path.split("/v1.0", 1)[-1]
-        if request.method == "POST":
-            return self._post(path, json.loads(request.content or b"{}"))
+        match request.method:
+            case "POST":
+                return self._post(path, json.loads(request.content or b"{}"))
+            case "PATCH" | "DELETE":
+                return self._subscription_change(request.method, path, json.loads(request.content or b"{}"))
         return self._graph(path, parse_qs(url.query))
+
+    MAIL_MAX = 10070 * 60
+
+    def _subscription_change(self, method: str, path: str, body: dict) -> httpx.Response:
+        match path.strip("/").split("/"):
+            case ["subscriptions", sid] if sid in self.subscriptions:
+                if method == "DELETE":
+                    del self.subscriptions[sid]
+                    return httpx.Response(204)
+                self.subscriptions[sid]["expirationDateTime"] = body["expirationDateTime"]
+                return httpx.Response(200, json={"id": sid, **self.subscriptions[sid]})
+            case ["subscriptions", _]:
+                return httpx.Response(404, json={"error": {"code": "ResourceNotFound"}})
+        return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
+
+    def _subscribe(self, body: dict) -> httpx.Response:
+        if self.subscription_status:
+            return httpx.Response(self.subscription_status, json={"error": {"code": "ExtensionError", "message": "refused"}})
+        import re
+        from datetime import datetime
+        m = re.fullmatch(r"me/mailFolders\('([^']+)'\)/messages", body.get("resource", ""))
+        if not m or body.get("changeType") != "created":
+            return httpx.Response(400, json={"error": {"code": "InvalidRequest", "message": "unsupported resource"}})
+        exp = datetime.fromisoformat(body["expirationDateTime"].replace("Z", "+00:00")).timestamp()
+        if exp - self.clock() > self.MAIL_MAX:
+            return httpx.Response(400, json={"error": {"code": "ExtensionError",
+                                                       "message": "Subscription expiration can only be 10070 minutes in the future."}})
+        sid = f"sub-{next(self._seq)}"
+        self.subscriptions[sid] = {"resource": body["resource"], "clientState": body.get("clientState", ""),
+                                   "expirationDateTime": body["expirationDateTime"], "folder": self._folder_id(m.group(1))}
+        return httpx.Response(201, json={"id": sid, **self.subscriptions[sid]})
 
     def _token(self, form: dict) -> httpx.Response:
         match form.get("grant_type", [""])[0]:
@@ -167,6 +224,8 @@ class FakeGraph:
 
     def _post(self, path: str, body: dict) -> httpx.Response:
         self.posted.append((path, body))
+        if path.strip("/") == "subscriptions":            # needs only Mail.Read: not a write
+            return self._subscribe(body)
         if self.forbid_writes:
             return httpx.Response(403, json={"error": {"code": "ErrorAccessDenied", "message": "Access is denied."}})
         match path.strip("/").split("/"):
@@ -176,6 +235,7 @@ class FakeGraph:
                     return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
                 self.removed.append((next(self._seq), m["folder"], mid))   # the source folder's delta: gone
                 m["folder"], m["seq"] = dest["id"], next(self._seq)        # immutable id: same id after the move
+                self._notify(mid)                                          # "created" in the destination folder
                 return httpx.Response(201, json=m)
             case ["me", "messages", mid, "forward"]:
                 if mid not in self.messages:

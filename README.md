@@ -98,6 +98,7 @@ as the server row's `X-Outlook-Account` header. Two mailboxes = two server rows.
 | `get_attachment` | `{mail_id, attachment_id}` | `{name, content_type, size, text?, base64?}` |
 | `move_mail` | `{mail_id, folder}` | `{id, folder, created}`; files the email into `folder` (a name or path such as `Dispatched/Sales`), creating missing folders along the path (`created` lists them). The id does not change. Do not move mail into the folder `poll_new_mail` watches: it would come back as new. |
 | `forward_mail` | `{mail_id, to, comment?}` | `{id, forwarded_to}`; forwards the email with its attachments from the connected mailbox. `to` is a list or one string separated by `,` or `;`. Graph has no per-message *redirect* (keeping the original sender): this is a forward. |
+| `wait_for_new` | `{poll?: "poll_new_mail", args?: {folder, from?, ...}, timeout_s?: 120}` | `{status: ready \| timeout, via?: event \| pending \| fallback, events: on \| off, reason?}`; waits until the poll with these `args` probably has new mail. Call that poll next, until it returns null; on `timeout`, wait again. See §6. |
 
 Every tool publishes its result's JSON Schema (`outputSchema` in `tools/list`). A success carries the
 result as `structuredContent`, and the same JSON as text for clients that read `content` only.
@@ -127,7 +128,53 @@ Attachments can carry prompt injection or files crafted against a parser, so:
   Outlook server as a tool only to agents **downstream of triage**, on the branch for legitimate mail.
 - Do not "optimise" attachment fetching back into `poll_new_mail`.
 
-## 6. Fake mode
+## 6. Events (wait instead of polling on a timer)
+
+`wait_for_new` lets a workflow sleep until mail arrives instead of polling every few minutes. With
+**events on**, Microsoft Graph sends a change notification for each new email in the watched folder to an
+**Azure Event Hub**; this server reads the hub over an **outbound** connection (AMQP 5671, or WebSockets
+443): no public URL, no inbound port. A notification only wakes the waiters: the next `poll_new_mail`
+(delta + queue) still decides what is new, so a lost or repeated notification is harmless.
+
+`wait_for_new` answers `ready` with `via`:
+
+- `event`: a notification arrived for the folder (live: ~1 minute after the mail).
+- `pending`: undelivered mail is already queued, or a notification came while nobody was waiting.
+- `fallback`: the safety poll is due (`WATCH_FALLBACK_S`, default 900 s), and on the first wait for a
+  folder after the server starts (mail may have come while it was down). With **events off** this is the
+  only way to become ready: plain timed polling, and `reason` says why events are off.
+
+It answers `timeout` after `timeout_s` (at most 150, under the 180 s tool timeout of SynergyAI's compiled
+scripts). Waits are asynchronous: many waiting workflows hold no worker threads.
+
+**Subscriptions** are created by the first wait on a folder (one per connection and folder, shared by every
+filter set), renewed every few days while something waits on them (Graph caps mail subscriptions at 10,070
+minutes), and deleted after a day without waits. Graph's lifecycle notifications are handled: a removed
+subscription is recreated and its folder woken to catch up. They need no extra permission (`Mail.Read`
+is enough). A refused create is retried every 15 minutes, meanwhile the folder polls on the fallback.
+
+**Set-up** (once per install, Azure portal):
+
+1. *Event Hubs* → **+ Create**: a namespace (Basic tier is enough), then on it **+ Event Hub**, e.g. `outlook-mail`.
+2. Open the **hub** (Entities → Event Hubs → the hub) → **Access control (IAM)** → **+ Add** → **Add role
+   assignment** → **Azure Event Hubs Data Sender** → **Next** → **+ Select members** → *Microsoft Graph
+   Change Tracking* → **Select** → **Review + assign**. If it is not found, add it once in Cloud Shell:
+   `az ad sp create --id 0bf30f3b-4a52-48df-9a82-234910c4a086`.
+3. On the hub: **Settings → Shared access policies → + Add**, `listen`, **Listen** only; copy its
+   *Connection string–primary key* (it ends with `;EntityPath=<hub>`).
+4. `.env`: `EVENTHUB_CONNECTION=<that string>` and
+   `EVENTHUB_NOTIFICATION_URL=EventHub:https://<namespace>.servicebus.windows.net/eventhubname/<hub>?tenantId=<tenant domain>`;
+   restart the server.
+
+Read positions are saved in the server's database, so a restart resumes where it stopped (the hub keeps
+events at least a day). Run **one** server per hub and consumer group (`EVENTHUB_CONSUMER_GROUP`):
+two would split the hub's partitions and each miss notifications.
+
+Graph also drops a "Validation: Testing client application reachability" message into the hub when a
+subscription is created; it names no subscription and is ignored, as is any notification whose
+`clientState` is not the subscription's secret.
+
+## 7. Fake mode
 
 `OUTLOOK_FAKE_GRAPH=1 ./run.sh` runs against a built-in fake of Microsoft sign-in and Graph: no
 Microsoft account, client id or secret key needed. Device sign-in succeeds on the first
@@ -139,6 +186,9 @@ Microsoft account, client id or secret key needed. Device sign-in succeeds on th
 | `POST /fake/messages` | `{folder?, subject, sender, received?, attachments?: [{name, content_type, text}]}` | Adds a message; returns `{id}`. `received` defaults to now. |
 | `GET /fake/requests` | — | Every request the server made to "Microsoft", e.g. to prove a poll fetched no attachment. |
 | `POST /fake/device` | `{"state": "connected"}` | Next device-code answer: `pending`, `connected`, `blocked` (Conditional Access) or `declined`. |
+
+In fake mode events are on without a hub: a fake message added to a watched folder notifies in-process, so
+`wait_for_new` answers `ready` / `event` at once.
 
 `./smoke.sh` runs an end-to-end check in fake mode on port 8779.
 

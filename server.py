@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import html
 import json
+import threading
 import time
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
@@ -121,6 +123,24 @@ TOOLS = [
          "id": {"type": "string", "description": "The forwarded email's id"},
          "forwarded_to": {"type": "array", "items": _STR, "description": "The addresses it went to"}},
          "required": ["id", "forwarded_to"]}},
+    {"name": "wait_for_new",
+     "description": ("Wait until the folder a poll watches probably has new mail, then answer status=ready; call that poll "
+                     "next, until it returns null. With events on (Microsoft Graph change notifications), ready comes "
+                     "within about a minute of new mail; with events off, or as a safety net, ready also comes every "
+                     "WATCH_FALLBACK_S seconds, and on the first wait after the server starts. status=timeout after "
+                     "timeout_s: just wait again. Never returns mail itself. Extra error code: invalid_argument." + _FAILS),
+     "inputSchema": {"type": "object", "properties": {
+         "poll": {"type": "string", "enum": ["poll_new_mail"], "description": "The poll to wait for. Default poll_new_mail."},
+         "args": {"type": "object", "description": "That poll's arguments, e.g. {\"folder\": \"Inbox\"}: the same folder "
+                                                   "and filters the workflow polls with."},
+         "timeout_s": {"type": "number", "description": "Longest wait in seconds, at most 150. Default 120."}}},
+     "outputSchema": {"type": "object", "properties": {
+         "status": {"type": "string", "enum": ["ready", "timeout"]},
+         "via": {"type": "string", "enum": ["event", "pending", "fallback"],
+                 "description": "Why ready: a notification, mail already waiting, or the safety poll"},
+         "events": {"type": "string", "enum": ["on", "off"], "description": "Whether notifications watch this folder"},
+         "reason": {"type": "string", "description": "Why events are off"}},
+         "required": ["status", "events"]}},
 ]
 
 
@@ -136,8 +156,10 @@ def _wrap(payload) -> dict:
 def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, clock=time.time, sleep=time.sleep) -> FastAPI:
     from auth import Auth, AuthError, Connector
     from graph import GraphClient, TokenSource
+    from events import EventHubListener, NotificationRouter, Waiter, Wakes
     from mail import MailService
     from store import Store
+    from subscriptions import SubscriptionKeeper
 
     if http is None and cfg.fake_graph:
         from fake_graph import FakeGraph
@@ -147,7 +169,25 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
     if http is None:
         http = httpx.Client(transport=httpx.MockTransport(fake.handler)) if fake else httpx.Client()
 
-    app = FastAPI(title="outlook_mcp")
+    state = {}
+
+    @asynccontextmanager
+    async def lifespan(app):
+        """Background work of a running server (TestClient without `with` skips it): the subscription keeper,
+        and the Event Hub listener when one is configured."""
+        stop = threading.Event()
+        threading.Thread(target=keeper.run, args=(stop,), name="subscription-keeper", daemon=True).start()
+        if cfg.eventhub_connection and not cfg.fake_graph:
+            listener = EventHubListener(cfg, store, router)
+            waiter.listener_error = lambda: listener.error
+            listener.start()
+            state["listener"] = listener
+        yield
+        stop.set()
+        if "listener" in state:
+            state["listener"].stop()
+
+    app = FastAPI(title="outlook_mcp", lifespan=lifespan)
     app.state.cfg = cfg
     app.state.clock_offset = [0.0]                     # tests move time forward
     now = lambda: clock() + app.state.clock_offset[0]
@@ -157,6 +197,13 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
     graph_for = lambda key: GraphClient(http, cfg.graph_base, TokenSource(auth, store, key, clock=now), sleep=sleep)
     mail = MailService(graph_for, store, cfg)
     # No Store.prune here: forgetting delivered ids could re-deliver old mail that delta sends again.
+    keeper = SubscriptionKeeper(store, mail._graph, cfg, clock=now)
+    wakes = Wakes()
+    router = NotificationRouter(store, keeper, wakes)
+    waiter = Waiter(mail, keeper, wakes, store, cfg, clock=now)
+    app.state.keeper, app.state.router, app.state.wakes = keeper, router, wakes
+    if fake is not None:
+        fake.on_notification = router.handle               # fake mode: Graph "delivers" in-process
 
     def ok(req_id, result):
         return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": result})
@@ -171,13 +218,27 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
             case "connect_status":
                 return connector.status(str(args.get("connect_id") or ""))
             case "whoami" | "list_folders" | "poll_new_mail" | "get_attachment" | "move_mail" | "forward_mail":
-                if not account_key:
-                    return {"error": "not_connected", "message": f"missing {CREDENTIAL_HEADER} header: connect the mailbox first"}
-                if store.connection(account_key) is None:
-                    return {"error": "reconnect_needed", "message": "unknown or removed connection"}
+                if (failed := connection_error(account_key)) is not None:
+                    return failed
                 return getattr(mail, name)(account_key, args)
             case _:
                 return None
+
+    def connection_error(account_key: str) -> dict | None:
+        if not account_key:
+            return {"error": "not_connected", "message": f"missing {CREDENTIAL_HEADER} header: connect the mailbox first"}
+        if store.connection(account_key) is None:
+            return {"error": "reconnect_needed", "message": "unknown or removed connection"}
+        return None
+
+    async def wait_for_new(args: dict, account_key: str) -> dict:
+        """Async, unlike the other tools: a waiter holds no worker thread, only its short Graph setup does."""
+        if (failed := connection_error(account_key)) is not None:
+            return failed
+        prep = await run_in_threadpool(waiter.prepare, account_key, args)
+        if "error" in prep:
+            return prep
+        return await waiter.wait(prep, args.get("timeout_s"))
 
     def call_tool(name: str, args: dict, account_key: str):
         """A tool's payload; a failure (sign-in service, the post-sign-in /me lookup, ...) is an error result."""
@@ -210,6 +271,9 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
                 return ok(req_id, {})
             case "tools/list":
                 return ok(req_id, {"tools": TOOLS})
+            case "tools/call" if params.get("name") == "wait_for_new":
+                return ok(req_id, _wrap(await wait_for_new(params.get("arguments") or {},
+                                                           request.headers.get(CREDENTIAL_HEADER, ""))))
             case "tools/call":
                 # Tools block (sync httpx, up to 10 s Retry-After): a worker thread, so one slow mailbox
                 # does not stall every other call on the event loop.

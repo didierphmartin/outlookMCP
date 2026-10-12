@@ -23,6 +23,16 @@ class AppConfig:
     attachment_max_bytes: int = 10_000_000
     fake_graph: bool = False
     fake_seed: str = ""                 # JSON file of messages for fake mode
+    # Events (Graph change notifications through Azure Event Hubs); README "Events".
+    eventhub_connection: str = ""       # Listen connection string of the hub (EntityPath included)
+    eventhub_consumer_group: str = "$Default"
+    notification_url: str = ""          # EventHub:https://<ns>.servicebus.windows.net/eventhubname/<hub>?tenantId=<tenant>
+    watch_fallback_s: int = 900         # wait_for_new is ready at least this often, events or not
+
+    @property
+    def events_enabled(self) -> bool:
+        """Subscriptions are created only with somewhere for Graph to send them (fake mode: in-process)."""
+        return bool(self.notification_url) or self.fake_graph
 
     SCOPES: ClassVar[str] = "openid profile offline_access User.Read Mail.ReadWrite Mail.Send"
 
@@ -49,4 +59,8 @@ class AppConfig:
             attachment_max_bytes=int(env.get("OUTLOOK_ATTACHMENT_MAX_BYTES", "10000000")),
             fake_graph=fake,
             fake_seed=env.get("OUTLOOK_FAKE_SEED", ""),
+            eventhub_connection=env.get("EVENTHUB_CONNECTION", ""),
+            eventhub_consumer_group=env.get("EVENTHUB_CONSUMER_GROUP") or "$Default",
+            notification_url=env.get("EVENTHUB_NOTIFICATION_URL", ""),
+            watch_fallback_s=int(env.get("WATCH_FALLBACK_S") or "900"),
         )

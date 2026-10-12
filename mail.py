@@ -168,6 +168,11 @@ class MailService:
         folder_id = self._folder_id(graph, args.get("folder") or "Inbox")
         return f"{folder_id}|{filters.signature()}", folder_id, filters
 
+    def watch_scope(self, key: str, args: dict) -> tuple[str, str]:
+        """(queue scope, folder id) of poll_new_mail with these arguments: what wait_for_new watches."""
+        scope, folder_id, _ = self._scope(self._graph(key), args)
+        return scope, folder_id
+
     def _refresh_queue_for_tests(self, key: str, folder: str, args: dict) -> None:
         graph = self._graph(key)
         scope, folder_id, filters = self._scope(graph, {**args, "folder": folder})

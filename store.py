@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS cursors (key_id TEXT, scope TEXT, delta_link TEXT, si
     PRIMARY KEY (key_id, scope));
 CREATE TABLE IF NOT EXISTS queue (key_id TEXT, scope TEXT, message_id TEXT, received_at TEXT,
     delivered INTEGER DEFAULT 0, delivered_at REAL, PRIMARY KEY (key_id, scope, message_id));
+CREATE TABLE IF NOT EXISTS subscriptions (key_id TEXT, resource TEXT, connection_key TEXT, sub_id TEXT,
+    client_state TEXT, expires_at REAL, last_wait_at REAL, error TEXT, PRIMARY KEY (key_id, resource));
+CREATE TABLE IF NOT EXISTS hub_positions (partition TEXT PRIMARY KEY, sequence INTEGER);
 """
 
 
@@ -166,6 +169,54 @@ class Store:
         """Undo a claim whose message the server itself failed to fetch: it was never handed to anyone."""
         self._x("UPDATE queue SET delivered = 0, delivered_at = NULL WHERE key_id = ? AND scope = ? AND message_id = ?",
                 (self.key_id(connection_key), scope, message_id))
+
+    def has_undelivered(self, connection_key: str, scope: str) -> bool:
+        return self._one("SELECT 1 FROM queue WHERE key_id = ? AND scope = ? AND delivered = 0 LIMIT 1",
+                         (self.key_id(connection_key), scope)) is not None
+
+    # change subscriptions (events) ---------------------------------------------
+    # The connection key is kept (encrypted) because the keeper renews subscriptions with no request in hand.
+    def _sub(self, row: tuple) -> dict:
+        return {"key_id": row[0], "resource": row[1], "connection_key": self._dec(row[2]), "sub_id": row[3],
+                "client_state": self._dec(row[4]) if row[4] else "", "expires_at": row[5], "last_wait_at": row[6],
+                "error": row[7]}
+
+    _SUB_COLS = "key_id, resource, connection_key, sub_id, client_state, expires_at, last_wait_at, error"
+
+    def subscription(self, connection_key: str, resource: str) -> dict | None:
+        row = self._one(f"SELECT {self._SUB_COLS} FROM subscriptions WHERE key_id = ? AND resource = ?",
+                        (self.key_id(connection_key), resource))
+        return self._sub(row) if row else None
+
+    def subscription_by_id(self, sub_id: str) -> dict | None:
+        row = self._one(f"SELECT {self._SUB_COLS} FROM subscriptions WHERE sub_id = ?", (sub_id,))
+        return self._sub(row) if row else None
+
+    def subscriptions(self) -> list[dict]:
+        return [self._sub(r) for r in self._x(f"SELECT {self._SUB_COLS} FROM subscriptions")]
+
+    def save_subscription(self, connection_key: str, resource: str, sub_id: str | None, client_state: str,
+                          expires_at: float, error: str | None = None) -> None:
+        """Create or replace; last_wait_at is kept (a renewal is not a wait)."""
+        kid = self.key_id(connection_key)
+        with self._tx() as db:
+            row = db.execute("SELECT last_wait_at FROM subscriptions WHERE key_id = ? AND resource = ?", (kid, resource)).fetchone()
+            db.execute("INSERT OR REPLACE INTO subscriptions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (kid, resource, self._enc(connection_key), sub_id, self._enc(client_state) if client_state else "",
+                        expires_at, row[0] if row else self._clock(), error))
+
+    def touch_subscription(self, connection_key: str, resource: str) -> None:
+        self._x("UPDATE subscriptions SET last_wait_at = ? WHERE key_id = ? AND resource = ?",
+                (self._clock(), self.key_id(connection_key), resource))
+
+    def delete_subscription(self, connection_key: str, resource: str) -> None:
+        self._x("DELETE FROM subscriptions WHERE key_id = ? AND resource = ?", (self.key_id(connection_key), resource))
+
+    def hub_positions(self) -> dict[str, int]:
+        return {p: s for p, s in self._x("SELECT partition, sequence FROM hub_positions")}
+
+    def save_hub_position(self, partition: str, sequence: int) -> None:
+        self._x("INSERT OR REPLACE INTO hub_positions VALUES (?, ?)", (partition, sequence))
 
     def prune(self, days: int = 30) -> None:
         self._x("DELETE FROM queue WHERE delivered = 1 AND delivered_at < ?", (self._clock() - days * 86400,))
