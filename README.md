@@ -94,8 +94,8 @@ as the server row's `X-Outlook-Account` header. Two mailboxes = two server rows.
 | `connect_status` | `{connect_id}` | `{status, account?, connection_key?, credential_header?, message?, redirect_url?}`; status is `pending`, `connected`, `expired`, `denied`, `policy_blocked`, `failed` (+ `message`) or `unknown` (no such `connect_id`, e.g. a typo or another server's database). With `OUTLOOK_PUBLIC_URL`, `policy_blocked`, `expired`, `denied` and `failed` add `redirect_url` (browser sign-in). The key is returned once, with `credential_header` (`X-Outlook-Account`): the header the app must send it in. |
 | `whoami` | — | `{account, tenant, connected_at}`, once Microsoft has confirmed the sign-in still works (a refused sign-in is `reconnect_needed`) |
 | `list_folders` | — | `{folders: [{id, name, path}]}` |
-| `poll_new_mail` | `{folder, from?, subject_contains?, has_attachments?}` | `{mail: {id, from, to, cc, subject, received_at, body_text, web_link, attachments} \| null}` |
-| `get_attachment` | `{mail_id, attachment_id}` | `{name, content_type, size, text?, base64?}` |
+| `poll_new_mail` | `{folder, mode?: "new" \| "drop", from?, subject_contains?, has_attachments?}` | `{mail: {id, attempt, from, to, cc, subject, received_at, body_text, web_link, attachments} \| null}` |
+| `get_attachment` | `{mail_id, attachment_id, raw?}` | `{name, content_type, size, text?, base64?}`; with `raw: true` always `{name, content_type, size, base64}`, never `text` |
 | `move_mail` | `{mail_id, folder}` | `{id, folder, created}`; files the email into `folder` (a name or path such as `Dispatched/Sales`), creating missing folders along the path (`created` lists them). The id does not change. Do not move mail into the folder `poll_new_mail` watches: it would come back as new. |
 | `forward_mail` | `{mail_id, to, comment?}` | `{id, forwarded_to}`; forwards the email with its attachments from the connected mailbox. `to` is a list or one string separated by `,` or `;`. Graph has no per-message *redirect* (keeping the original sender): this is a forward. |
 | `wait_for_new` | `{poll?: "poll_new_mail", args?: {folder, from?, ...}, timeout_s?: 120}` | `{status: ready \| timeout, via?: event \| pending \| fallback, events: on \| off, reason?}`; waits until the poll with these `args` probably has new mail. Call that poll next, until it returns null; on `timeout`, wait again. See §6. |
@@ -115,7 +115,17 @@ set at **now** (a changed filter replays nothing), and remembers what it deliver
 delta state (410 Gone / SyncState errors), the server starts the folder's delta again from that same
 starting point; already delivered mail is not delivered again. Message ids are immutable ids, so a
 mail keeps its id when it is moved to another folder. `mail` is
-`{id, from, to, cc, subject, received_at, body_text, web_link, attachments: [{id, name, content_type, size}]}`.
+`{id, attempt, from, to, cc, subject, received_at, body_text, web_link, attachments: [{id, name, content_type, size, is_inline}]}`.
+
+- **`mode`** is `"new"` (default: mail received after the watch started, delivered once) or `"drop"`: any
+  email that arrives in the folder counts, whatever its received date (a drop folder is created when
+  missing). A drop-mode email still in the folder `DROP_LEASE_S` seconds (default 600) after it was delivered
+  is delivered again, up to 3 deliveries in all, so move it out of the folder once handled. `wait_for_new`
+  takes the same `mode` inside its `args`.
+- **`attempt`** is which delivery of the email this is: always 1 in `new` mode; 2 or 3 in `drop` mode when the
+  email stayed in the folder past the lease.
+- **`is_inline`** is true for an attachment embedded in the body (a logo, a picture) rather than a file the
+  sender attached.
 
 ### Attachments stay unopened until after triage
 
@@ -127,6 +137,12 @@ Attachments can carry prompt injection or files crafted against a parser, so:
 - Agents open them with `get_attachment`, the **only** place content is downloaded or parsed. Give the
   Outlook server as a tool only to agents **downstream of triage**, on the branch for legitimate mail.
 - Do not "optimise" attachment fetching back into `poll_new_mail`.
+
+`get_attachment` converts to text where it can (PDF, Word, plain text) and otherwise returns `base64`. With
+**`raw: true`** it always returns the original bytes as `base64` and never `text`, e.g. to file a PDF as it
+came. The same size cap applies (`OUTLOOK_ATTACHMENT_MAX_BYTES`; over it is a `too_large` error). An attached
+email (a Graph item attachment) comes back as its MIME, named `<subject>.eml`, with content type
+`message/rfc822`.
 
 ## 6. Events (wait instead of polling on a timer)
 

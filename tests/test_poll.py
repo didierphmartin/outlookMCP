@@ -50,7 +50,7 @@ def test_mail_shape_and_attachments_never_opened(fake, svc):
     assert mail["body_text"] == "Hello John"
     assert mail["web_link"].startswith("https://outlook.office.com/")
     assert mail["attachments"] == [{"id": mail["id"] + "-a0", "name": "invoice.pdf",
-                                    "content_type": "application/pdf", "size": 12}]
+                                    "content_type": "application/pdf", "size": 12, "is_inline": False}]
     assert not [p for m, p in fake.requests if "/attachments/" in p], "a poll must never fetch attachment content"
     assert not [p for m, p in fake.requests if "contentBytes" in p]
 

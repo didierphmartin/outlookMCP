@@ -86,3 +86,47 @@ def test_whoami_asks_microsoft_so_a_refused_sign_in_is_reconnect_needed(fake, sv
     fake.revoke_refresh()                                   # e.g. AADSTS530035: the tenant now blocks the grant
     w = svc.whoami("key-1")
     assert w["error"] == "reconnect_needed" and "invalid_grant" in w["message"]
+
+
+def test_raw_returns_base64_for_pdf(fake, svc):
+    pdf = b"%PDF-1.4 raw bytes \x00\xff"
+    mid = fake.add_message(attachments=[("a.pdf", "application/pdf", pdf)])
+    args = {"mail_id": mid, "attachment_id": f"{mid}-a0"}
+    r = svc.get_attachment("key-1", {**args, "raw": True})
+    assert r == {"name": "a.pdf", "content_type": "application/pdf", "size": len(pdf),
+                 "base64": base64.b64encode(pdf).decode()}
+    assert "text" not in svc.get_attachment("key-1", {**args, "raw": True})
+    txt = fake.add_message(attachments=[("n.txt", "text/plain", b"hello")])
+    r = svc.get_attachment("key-1", {"mail_id": txt, "attachment_id": f"{txt}-a0", "raw": True})
+    assert base64.b64decode(r["base64"]) == b"hello" and "text" not in r
+
+
+def test_raw_too_large_is_error(fake, svc):
+    from dataclasses import replace
+    svc.cfg = replace(svc.cfg, attachment_max_bytes=3)
+    mid = fake.add_message(attachments=[("big.bin", "application/octet-stream", b"12345")])
+    r = svc.get_attachment("key-1", {"mail_id": mid, "attachment_id": f"{mid}-a0", "raw": True})
+    assert r["error"] == "too_large"
+    assert not [p for m, p in fake.requests if p.endswith("/$value")]
+
+
+def test_raw_item_attachment_is_eml(fake, svc):
+    mime = b"From: a@b.c\r\nSubject: Hi\r\n\r\nbody"
+    mid = fake.add_message(attachments=[("Quarterly report", "", mime, False, True),
+                                        ("fwd.eml", "", mime, False, True)])
+    r = svc.get_attachment("key-1", {"mail_id": mid, "attachment_id": f"{mid}-a0", "raw": True})
+    assert r == {"name": "Quarterly report.eml", "content_type": "message/rfc822", "size": len(mime),
+                 "base64": base64.b64encode(mime).decode()}
+    r = svc.get_attachment("key-1", {"mail_id": mid, "attachment_id": f"{mid}-a1", "raw": True})
+    assert r["name"] == "fwd.eml"
+    nameless = fake.add_message(attachments=[("", "", mime, False, True)])
+    r = svc.get_attachment("key-1", {"mail_id": nameless, "attachment_id": f"{nameless}-a0", "raw": True})
+    assert r["name"] == "Attached email.eml"
+
+
+def test_attachment_list_has_is_inline(fake, svc):
+    svc.poll_new_mail("key-1", {"folder": "Inbox"})
+    fake.add_message(received="2026-10-07T10:01:00Z",
+                     attachments=[("logo.png", "image/png", b"x", True), ("a.txt", "text/plain", b"y")])
+    atts = svc.poll_new_mail("key-1", {"folder": "Inbox"})["mail"]["attachments"]
+    assert [(a["name"], a["is_inline"]) for a in atts] == [("logo.png", True), ("a.txt", False)]

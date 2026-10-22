@@ -19,7 +19,8 @@ from graph import GraphError
 
 DELTA_SELECT = "id,from,subject,receivedDateTime,hasAttachments"
 FULL_SELECT = "id,from,toRecipients,ccRecipients,subject,receivedDateTime,body,webLink,hasAttachments,parentFolderId"
-ATTACHMENT_META = "attachments($select=id,name,contentType,size)"   # metadata only, never contentBytes
+ITEM_ATTACHMENT = "#microsoft.graph.itemAttachment"
+ATTACHMENT_META = "attachments($select=id,name,contentType,size,isInline)"   # metadata only, never contentBytes
 EMAIL = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
 
 
@@ -38,7 +39,8 @@ class Message:
                 "subject": m.get("subject") or "", "received_at": m.get("receivedDateTime"),
                 "body_text": body_text(m.get("body")), "web_link": m.get("webLink") or "",
                 "attachments": [{"id": a["id"], "name": a.get("name", ""), "content_type": a.get("contentType", ""),
-                                 "size": int(a.get("size") or 0)} for a in m.get("attachments") or []]}
+                                 "size": int(a.get("size") or 0),
+                                 "is_inline": bool(a.get("isInline"))} for a in m.get("attachments") or []]}
 
 
 MODES = ("new", "drop")
@@ -336,6 +338,9 @@ class MailService:
             graph = self._graph(key)
             meta = graph.get(f"/me/messages/{mid}/attachments/{aid}", {"$select": "id,name,contentType,size"})
             name, ctype, size = meta.get("name", ""), meta.get("contentType", ""), int(meta.get("size") or 0)
+            if args.get("raw") and meta.get("@odata.type") == ITEM_ATTACHMENT:      # an attached email: its MIME, named <subject>.eml
+                name = name or "Attached email"
+                name, ctype = name if name.lower().endswith(".eml") else name + ".eml", "message/rfc822"
             if size > self.cfg.attachment_max_bytes:        # judged from metadata: nothing is downloaded
                 return {"error": "too_large", "message": f"{name} is {size} bytes (limit {self.cfg.attachment_max_bytes})"}
             data = graph.get_bytes(f"/me/messages/{mid}/attachments/{aid}/$value")
@@ -344,6 +349,8 @@ class MailService:
         if len(data) > self.cfg.attachment_max_bytes:       # metadata size 0 or missing must not bypass the cap
             return {"error": "too_large", "message": f"{name} is {len(data)} bytes (limit {self.cfg.attachment_max_bytes})"}
         size = size or len(data)
+        if args.get("raw"):
+            return {"name": name, "content_type": ctype, "size": size, "base64": base64.b64encode(data).decode()}
         try:
             text = attachment_text(name, ctype, data)
         except Exception as e:  # noqa: BLE001 -- a corrupt/encrypted file is reported, never raised
