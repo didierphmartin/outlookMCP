@@ -115,7 +115,7 @@ set at **now** (a changed filter replays nothing), and remembers what it deliver
 delta state (410 Gone / SyncState errors), the server starts the folder's delta again from that same
 starting point; already delivered mail is not delivered again. Message ids are immutable ids, so a
 mail keeps its id when it is moved to another folder. `mail` is
-`{id, attempt, from, to, cc, subject, received_at, body_text, web_link, attachments: [{id, name, content_type, size, is_inline}]}`.
+`{id, attempt, from, to, cc, subject, received_at, body_text, web_link, attachments: [{id, name, content_type, size, is_inline, kind}]}`.
 
 - **`mode`** is `"new"` (default: mail received after the watch started, delivered once) or `"drop"`: any
   email that arrives in the folder counts, whatever its received date (a drop folder is created when
@@ -126,6 +126,9 @@ mail keeps its id when it is moved to another folder. `mail` is
   email stayed in the folder past the lease.
 - **`is_inline`** is true for an attachment embedded in the body (a logo, a picture) rather than a file the
   sender attached.
+- **`kind`** is `"file"` (a stored file), `"item"` (an attached email) or `"reference"` (a cloud link to a
+  OneDrive/SharePoint file: Graph has no content for it, so `get_attachment` answers `cloud_attachment` and
+  `mail_to_pdf` lists it as "(cloud link, not stored)").
 
 ### Attachments stay unopened until after triage
 
@@ -142,7 +145,8 @@ Attachments can carry prompt injection or files crafted against a parser, so:
 **`raw: true`** it always returns the original bytes as `base64` and never `text`, e.g. to file a PDF as it
 came. The same size cap applies (`OUTLOOK_ATTACHMENT_MAX_BYTES`; over it is a `too_large` error). An attached
 email (a Graph item attachment) comes back as its MIME, named `<subject>.eml`, with content type
-`message/rfc822`.
+`message/rfc822`. A cloud-link attachment (`kind: "reference"`) has no content: `get_attachment` answers the
+error `cloud_attachment`.
 
 ## 6. Events (wait instead of polling on a timer)
 

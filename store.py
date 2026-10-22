@@ -168,6 +168,11 @@ class Store:
                            "VALUES (?, ?, ?, ?, ?, 1, ?)",
                            [(kid, scope, m, r, int(baseline), int(baseline)) for m, r in items])
 
+    def queued_except(self, connection_key: str, scope: str, keep: set[str]) -> list[str]:
+        """Ids of this scope's rows that are not in `keep`."""
+        rows = self._x("SELECT message_id FROM queue WHERE key_id = ? AND scope = ?", (self.key_id(connection_key), scope))
+        return [m for (m,) in rows if m not in keep]
+
     def forget(self, connection_key: str, scope: str, message_ids: list[str]) -> None:
         kid = self.key_id(connection_key)
         with self._tx() as db:

@@ -28,6 +28,8 @@ def _when(iso: str | None) -> str:
 
 
 def _attachment_line(a: dict) -> str:
+    if a.get("@odata.type") == "#microsoft.graph.referenceAttachment":     # a link to a cloud file: never filed
+        return f"{a.get('name', '')} (cloud link, not stored)"
     return f"{a.get('name', '')} ({round(int(a.get('size') or 0) / 1024)} KB)"
 
 

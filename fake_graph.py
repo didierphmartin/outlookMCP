@@ -47,6 +47,9 @@ class FakeGraph:
         self.on_notification = None
         self.subscription_status: int | None = None   # POST /subscriptions answers this error status instead
         self.clock = time.time                         # "now" for the subscription expiry limit
+        # How GET /me/messages/<id> writes parentFolderId (None: the folder id as is). Real Graph may answer it
+        # in another id form than the mailFolders lookup.
+        self.parent_folder_id_form = None
 
     # test controls -------------------------------------------------------------
     def add_message(self, folder="inbox", subject="", sender="a@b.c", received="2026-10-07T10:00:00Z",
@@ -54,11 +57,13 @@ class FakeGraph:
         seq = next(self._seq)
         mid = f"m{seq}"
         atts = []
-        for i, (name, ctype, data, *flags) in enumerate(attachments):   # flags: inline, item (attached email), contentId
-            inline, item, cid = (list(flags) + [False, False, None])[:3]
+        for i, (name, ctype, data, *flags) in enumerate(attachments):
+            # flags: inline, item (attached email), contentId, reference (a cloud link: no content to download)
+            inline, item, cid, ref = (list(flags) + [False, False, None, False])[:4]
             aid = f"{mid}-a{i}"
             self.attachments[aid] = data
-            atts.append({"@odata.type": "#microsoft.graph." + ("itemAttachment" if item else "fileAttachment"),
+            kind = "referenceAttachment" if ref else "itemAttachment" if item else "fileAttachment"
+            atts.append({"@odata.type": "#microsoft.graph." + kind,
                          "id": aid, "name": name, "contentType": ctype, "size": len(data), "isInline": bool(inline),
                          **({"contentId": cid} if cid else {})})
         self.messages[mid] = {"id": mid, "seq": seq, "folder": self._folder_id(folder), "subject": subject,
@@ -214,7 +219,15 @@ class FakeGraph:
                 return httpx.Response(200, json=f) if f else httpx.Response(404, json={"error": {"code": "ErrorFolderNotFound"}})
             case ["me", "mailFolders", fid, "messages", "delta"]:
                 return self._delta(self._folder_id(fid), q)
+            case ["me", "mailFolders", fid, "messages", mid]:
+                m = self.messages.get(mid)
+                if m is None or m["folder"] != self._folder_id(fid):
+                    return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
+                return httpx.Response(200, json={"id": mid})
             case ["me", "messages", mid, "attachments", aid, "$value"]:
+                att = next((a for a in self.messages.get(mid, {}).get("attachments", []) if a["id"] == aid), {})
+                if att.get("@odata.type") == "#microsoft.graph.referenceAttachment":    # a link: nothing to download
+                    return httpx.Response(400, json={"error": {"code": "ErrorInvalidRequest"}})
                 return httpx.Response(200, content=self.attachments[aid])
             case ["me", "messages", mid, "attachments", aid]:
                 m = self.messages.get(mid)
@@ -224,7 +237,8 @@ class FakeGraph:
                 m = self.messages.get(mid)
                 if m is None:
                     return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
-                return httpx.Response(200, json={**m, "parentFolderId": m["folder"]})
+                form = self.parent_folder_id_form or (lambda fid: fid)
+                return httpx.Response(200, json={**m, "parentFolderId": form(m["folder"])})
         return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
 
     def _post(self, path: str, body: dict) -> httpx.Response:
@@ -268,7 +282,8 @@ class FakeGraph:
                    if m["folder"] == fid and m["seq"] > after and m["receivedDateTime"] >= since]
         changes = [{k: v for k, v in m.items() if k in ("id", "from", "subject", "receivedDateTime", "hasAttachments")}
                    for m in changes]
-        changes += [{"id": mid, "@removed": {"reason": "deleted"}} for seq, f, mid in self.removed if f == fid and seq > after]
+        if "$deltatoken" in q:                            # like real Graph, a first (token-less) round lists no removals
+            changes += [{"id": mid, "@removed": {"reason": "deleted"}} for seq, f, mid in self.removed if f == fid and seq > after]
         page, rest = changes[skip:skip + 2], changes[skip + 2:]
         base = f"https://graph.microsoft.com/v1.0/me/mailFolders/{fid}/messages/delta"
         keep_filter = "&$filter=" + quote(f"receivedDateTime ge {since}") if since else ""

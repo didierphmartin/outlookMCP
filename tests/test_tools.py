@@ -130,3 +130,19 @@ def test_attachment_list_has_is_inline(fake, svc):
                      attachments=[("logo.png", "image/png", b"x", True), ("a.txt", "text/plain", b"y")])
     atts = svc.poll_new_mail("key-1", {"folder": "Inbox"})["mail"]["attachments"]
     assert [(a["name"], a["is_inline"]) for a in atts] == [("logo.png", True), ("a.txt", False)]
+
+
+def test_attachment_list_has_kind(fake, svc):
+    svc.poll_new_mail("key-1", {"folder": "Inbox"})
+    fake.add_message(received="2026-10-07T10:01:00Z",
+                     attachments=[("a.pdf", "application/pdf", b"x"), ("Fwd", "", b"y", False, True),
+                                  ("Budget.xlsx", "", b"", False, False, None, True)])
+    atts = svc.poll_new_mail("key-1", {"folder": "Inbox"})["mail"]["attachments"]
+    assert [(a["name"], a["kind"]) for a in atts] == [("a.pdf", "file"), ("Fwd", "item"), ("Budget.xlsx", "reference")]
+
+
+def test_raw_reference_attachment_is_cloud_attachment_error(fake, svc):
+    mid = fake.add_message(attachments=[("Budget.xlsx", "", b"", False, False, None, True)])
+    r = svc.get_attachment("key-1", {"mail_id": mid, "attachment_id": f"{mid}-a0", "raw": True})
+    assert r["error"] == "cloud_attachment" and "Budget.xlsx" in r["message"]
+    assert not [p for m, p in fake.requests if p.endswith("/$value")]

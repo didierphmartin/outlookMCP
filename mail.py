@@ -21,6 +21,8 @@ from pdf import render_mail
 DELTA_SELECT = "id,from,subject,receivedDateTime,hasAttachments"
 FULL_SELECT = "id,from,toRecipients,ccRecipients,subject,receivedDateTime,body,webLink,hasAttachments,parentFolderId"
 ITEM_ATTACHMENT = "#microsoft.graph.itemAttachment"
+REFERENCE_ATTACHMENT = "#microsoft.graph.referenceAttachment"      # a cloud link (OneDrive/SharePoint): no content
+ATTACHMENT_KINDS = {ITEM_ATTACHMENT: "item", REFERENCE_ATTACHMENT: "reference"}   # anything else is a file
 ATTACHMENT_META = "attachments($select=id,name,contentType,size,isInline)"   # metadata only, never contentBytes
 EMAIL = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
 
@@ -41,7 +43,9 @@ class Message:
                 "body_text": body_text(m.get("body")), "web_link": m.get("webLink") or "",
                 "attachments": [{"id": a["id"], "name": a.get("name", ""), "content_type": a.get("contentType", ""),
                                  "size": int(a.get("size") or 0),
-                                 "is_inline": bool(a.get("isInline"))} for a in m.get("attachments") or []]}
+                                 "is_inline": bool(a.get("isInline")),
+                                 "kind": ATTACHMENT_KINDS.get(a.get("@odata.type"), "file")}
+                                for a in m.get("attachments") or []]}
 
 
 MODES = ("new", "drop")
@@ -183,10 +187,11 @@ class MailService:
         except GraphError as e:
             if e.code != "sync_state_lost" or baseline:
                 raise
-            # A stale delta link: rescan the whole folder. Rows already queued (the baseline included) are kept
-            # as they are; only emails not queued yet are added, so nothing is delivered twice.
-            removed = []
-            found, delta_link = self._read_delta(graph, *fresh, "", filters, removed)
+            # A stale delta link: rescan the whole folder. Rows of emails still there (the baseline included) are
+            # kept as they are, so nothing is delivered twice; only emails not queued yet are added. Rows of emails
+            # that left during the gap are forgotten (their @removed is lost), so dragging one back queues it again.
+            found, delta_link = self._read_delta(graph, *fresh, "", filters)
+            removed = self.store.queued_except(key, scope, {mid for mid, _ in found})
         self.store.forget(key, scope, removed)
         self.store.enqueue_drop(key, scope, found, baseline=baseline)   # before the cursor: a crash re-reads
         self.store.save_cursor(key, scope, delta_link, cur["since"] if cur else self.now_iso())
@@ -253,13 +258,28 @@ class MailService:
                     raise                                         # permanent: the message counts as consumed
                 if not filters.drop:
                     return {"mail": Message.shape(m)}             # a shape failure is permanent too: consumed
-                if m.get("parentFolderId") != folder_id:          # left the drop folder since the last delta round
-                    self.store.forget(key, scope, [mid])
+                if m.get("parentFolderId") != folder_id and not self._still_in(graph, key, scope, folder_id, mid):
+                    self.store.forget(key, scope, [mid])          # left the drop folder since the last delta round
                     continue
                 return {"mail": Message.shape(m, self.store.attempts(key, scope, mid))}
             return {"mail": None}
         except Exception as e:                                      # the tool never raises
             return self._failure(e)
+
+    def _still_in(self, graph, key: str, scope: str, folder_id: str, mid: str) -> bool:
+        """Is the message in the folder? Asked of the folder itself, so the answer does not depend on the id
+        form Graph writes parentFolderId in. A failure other than 404 leaves the claim unspent and is raised."""
+        try:
+            graph.get(f"/me/mailFolders/{folder_id}/messages/{quote(mid, safe='')}", {"$select": "id"})
+            return True
+        except GraphError as e:
+            if e.code == "not_found":
+                return False
+            self.store.release(key, scope, mid)
+            raise
+        except (httpx.HTTPError, ValueError):
+            self.store.release(key, scope, mid)
+            raise
 
     @staticmethod
     def _failure(e: Exception) -> dict:
@@ -339,6 +359,8 @@ class MailService:
             graph = self._graph(key)
             meta = graph.get(f"/me/messages/{mid}/attachments/{aid}", {"$select": "id,name,contentType,size"})
             name, ctype, size = meta.get("name", ""), meta.get("contentType", ""), int(meta.get("size") or 0)
+            if meta.get("@odata.type") == REFERENCE_ATTACHMENT:
+                return {"error": "cloud_attachment", "message": f"{name} is a cloud link, not a stored file: nothing to download"}
             if args.get("raw") and meta.get("@odata.type") == ITEM_ATTACHMENT:      # an attached email: its MIME, named <subject>.eml
                 name = name or "Attached email"
                 name, ctype = name if name.lower().endswith(".eml") else name + ".eml", "message/rfc822"
@@ -370,7 +392,7 @@ class MailService:
                                                   "$expand": "attachments($select=id,name,contentType,size,isInline,contentId)"})
             inline = {}
             for a in m.get("attachments") or []:
-                if a.get("isInline") and a.get("contentId") and a.get("@odata.type") != ITEM_ATTACHMENT \
+                if a.get("isInline") and a.get("contentId") and a.get("@odata.type") not in ATTACHMENT_KINDS \
                         and int(a.get("size") or 0) <= self.cfg.attachment_max_bytes:
                     inline[a["contentId"]] = graph.get_bytes(f"/me/messages/{mid}/attachments/{quote(a['id'], safe='')}/$value")
         except Exception as e:

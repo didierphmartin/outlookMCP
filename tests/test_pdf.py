@@ -81,3 +81,16 @@ def test_tool_returns_base64_pdf(svc, fake):
 
 def test_tool_unknown_mail_is_not_found(svc):
     assert svc.mail_to_pdf("key-1", {"mail_id": "nope"})["error"] == "not_found"
+
+
+def test_plain_text_body_renders():
+    body = {"contentType": "text", "content": "Line one\nLine two <not a tag>"}
+    t = text_of(render_mail(mail(body=body), {}))
+    assert "Line one" in t and "Line two <not a tag>" in t and "Quarterly report" in t
+
+
+def test_tool_lists_cloud_link_attachments_as_not_stored(svc, fake):
+    mid = fake.add_message(subject="Hi", attachments=[("Budget.xlsx", "", b"", False, False, None, True),
+                                                      ("a.txt", "text/plain", b"abc")])
+    t = text_of(base64.b64decode(svc.mail_to_pdf("key-1", {"mail_id": mid})["base64"]))
+    assert "Budget.xlsx (cloud link, not stored)" in t and "a.txt" in t

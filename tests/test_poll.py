@@ -50,7 +50,8 @@ def test_mail_shape_and_attachments_never_opened(fake, svc):
     assert mail["body_text"] == "Hello John"
     assert mail["web_link"].startswith("https://outlook.office.com/")
     assert mail["attachments"] == [{"id": mail["id"] + "-a0", "name": "invoice.pdf",
-                                    "content_type": "application/pdf", "size": 12, "is_inline": False}]
+                                    "content_type": "application/pdf", "size": 12, "is_inline": False,
+                                    "kind": "file"}]
     assert not [p for m, p in fake.requests if "/attachments/" in p], "a poll must never fetch attachment content"
     assert not [p for m, p in fake.requests if "contentBytes" in p]
 
@@ -465,6 +466,15 @@ def test_drop_claim_skips_mail_no_longer_in_folder(fake, svc):
     fake.messages[mid]["folder"] = "projects-id"         # moved elsewhere, no delta round has seen it
     assert drop(svc) == {"mail": None}
     assert queue_rows(svc, mid) == []
+    assert any("/mailFolders/" in p and f"/messages/{mid}?" in p for _, p in fake.requests)   # confirmed first
+
+
+def test_drop_claim_parent_id_in_another_form_but_mail_in_folder_is_delivered(fake, svc):
+    drop(svc)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    fake.parent_folder_id_form = lambda fid: "AAMkAD" + fid    # Graph's parentFolderId, another id form
+    mail = drop(svc)["mail"]
+    assert mail["id"] == mid and mail["attempt"] == 1
 
 
 def test_drop_folder_created_when_missing(fake, svc):
@@ -520,3 +530,18 @@ def test_drop_sync_state_lost_keeps_baseline_and_queues_the_rest(fake, svc):
     mail = drop(svc)["mail"]
     assert mail["id"] == new and mail["attempt"] == 1
     assert drop(svc) == {"mail": None}                   # the rescan did not re-deliver the baseline
+
+
+def test_drop_sync_state_lost_forgets_mail_that_left_so_dragging_it_back_delivers_it(fake, svc):
+    drop(svc)                                            # creates the drop folder
+    base = fake.add_message(folder=DROP, subject="base", received="2026-10-01T08:00:00Z")
+    svc.store._x("DELETE FROM cursors")                  # a fresh watch: base is its baseline, never delivered
+    assert drop(svc) == {"mail": None}
+    assert queue_rows(svc, base) == [(base,)]
+    move(svc, base, "Filed")                             # moved out while the delta link goes stale
+    fake.delta_link_failure = 410
+    assert drop(svc) == {"mail": None}                   # the rescan no longer finds it: its row is forgotten
+    assert queue_rows(svc, base) == []
+    move(svc, base, DROP)                                # dragged back
+    mail = drop(svc)["mail"]
+    assert mail["id"] == base and mail["attempt"] == 1
