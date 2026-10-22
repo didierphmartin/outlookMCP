@@ -32,6 +32,11 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA busy_timeout=5000")
         self._db.executescript(SCHEMA)
+        have = {r[1] for r in self._db.execute("PRAGMA table_info(queue)")}
+        for col in ("attempts", "in_folder", "baseline"):
+            if col not in have:
+                self._db.execute(f"ALTER TABLE queue ADD COLUMN {col} INTEGER DEFAULT 0")
+        self._db.commit()
         self._fernet = Fernet(secret_key.encode() if isinstance(secret_key, str) else secret_key)
         self._lock = threading.Lock()
         self._clock = clock
@@ -152,16 +157,48 @@ class Store:
                         (self.key_id(connection_key), scope))
         return row[0] if row else None
 
-    def claim_next(self, connection_key: str, scope: str) -> str | None:
-        """Oldest undelivered message, marked delivered in the same transaction. Delivery is
-        at-most-once by design: a message claimed but lost by the caller is not offered again."""
+    def enqueue_drop(self, connection_key: str, scope: str, items: list[tuple[str, str]], baseline: bool) -> None:
+        """Drop-folder rows: in_folder until forgotten. Baseline rows (mail already there when the watch
+        started) are born delivered, so they are never claimed."""
         kid = self.key_id(connection_key)
         with self._tx() as db:
-            row = db.execute("SELECT message_id FROM queue WHERE key_id = ? AND scope = ? AND delivered = 0 "
-                             "ORDER BY received_at, message_id LIMIT 1", (kid, scope)).fetchone()
+            db.executemany("INSERT OR IGNORE INTO queue (key_id, scope, message_id, received_at, delivered, in_folder, baseline) "
+                           "VALUES (?, ?, ?, ?, ?, 1, ?)",
+                           [(kid, scope, m, r, int(baseline), int(baseline)) for m, r in items])
+
+    def forget(self, connection_key: str, scope: str, message_ids: list[str]) -> None:
+        kid = self.key_id(connection_key)
+        with self._tx() as db:
+            db.executemany("DELETE FROM queue WHERE key_id = ? AND scope = ? AND message_id = ?",
+                           [(kid, scope, m) for m in message_ids])
+
+    def attempts(self, connection_key: str, scope: str, message_id: str) -> int:
+        row = self._one("SELECT attempts FROM queue WHERE key_id = ? AND scope = ? AND message_id = ?",
+                        (self.key_id(connection_key), scope, message_id))
+        return row[0] if row else 0
+
+    def _drop_due(self, lease_s: float, max_attempts: int) -> tuple[str, tuple]:
+        return ("in_folder = 1 AND baseline = 0 AND attempts < ? AND (delivered = 0 OR delivered_at <= ?)",
+                (max_attempts, self._clock() - lease_s))
+
+    def claim_next(self, connection_key: str, scope: str, lease_s: float | None = None,
+                   max_attempts: int = 3) -> str | None:
+        """Oldest undelivered message, marked delivered in the same transaction. Without lease_s delivery
+        is at-most-once by design: a message claimed but lost by the caller is not offered again.
+        With lease_s (drop mode) a claimed message that is still in the folder is offered again once the
+        lease has run out, up to max_attempts times."""
+        kid = self.key_id(connection_key)
+        with self._tx() as db:
+            if lease_s is None:
+                cond, args = "delivered = 0", ()
+            else:
+                cond, args = self._drop_due(lease_s, max_attempts)
+            row = db.execute(f"SELECT message_id FROM queue WHERE key_id = ? AND scope = ? AND {cond} "
+                             "ORDER BY received_at, message_id LIMIT 1", (kid, scope, *args)).fetchone()
             if not row:
                 return None
-            db.execute("UPDATE queue SET delivered = 1, delivered_at = ? WHERE key_id = ? AND scope = ? AND message_id = ?",
+            db.execute("UPDATE queue SET delivered = 1, delivered_at = ?, attempts = attempts + 1 "
+                       "WHERE key_id = ? AND scope = ? AND message_id = ?",
                        (self._clock(), kid, scope, row[0]))
             return row[0]
 
@@ -170,9 +207,14 @@ class Store:
         self._x("UPDATE queue SET delivered = 0, delivered_at = NULL WHERE key_id = ? AND scope = ? AND message_id = ?",
                 (self.key_id(connection_key), scope, message_id))
 
-    def has_undelivered(self, connection_key: str, scope: str) -> bool:
-        return self._one("SELECT 1 FROM queue WHERE key_id = ? AND scope = ? AND delivered = 0 LIMIT 1",
-                         (self.key_id(connection_key), scope)) is not None
+    def has_undelivered(self, connection_key: str, scope: str, lease_s: float | None = None,
+                        max_attempts: int = 3) -> bool:
+        if lease_s is None:
+            cond, args = "delivered = 0", ()
+        else:
+            cond, args = self._drop_due(lease_s, max_attempts)
+        return self._one(f"SELECT 1 FROM queue WHERE key_id = ? AND scope = ? AND {cond} LIMIT 1",
+                         (self.key_id(connection_key), scope, *args)) is not None
 
     # change subscriptions (events) ---------------------------------------------
     # The connection key is kept (encrypted) because the keeper renews subscriptions with no request in hand.
@@ -219,4 +261,4 @@ class Store:
         self._x("INSERT OR REPLACE INTO hub_positions VALUES (?, ?)", (partition, sequence))
 
     def prune(self, days: int = 30) -> None:
-        self._x("DELETE FROM queue WHERE delivered = 1 AND delivered_at < ?", (self._clock() - days * 86400,))
+        self._x("DELETE FROM queue WHERE delivered = 1 AND in_folder = 0 AND delivered_at < ?", (self._clock() - days * 86400,))
