@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 
+from subscriptions import folder_of, mail_resource
 
 log = logging.getLogger("outlook_mcp.events")
 
@@ -99,14 +100,18 @@ class NotificationRouter:
     def _arrived(self, sub: dict, n: dict) -> None:
         """A "created" notification is an email arriving in the folder now. Dragged out and back between two
         delta rounds, it shows in the delta only as a change, so its drop rows are reset here: delivered again
-        from attempt 1, even after its attempts ran out."""
-        from subscriptions import folder_of
+        from attempt 1, even after its attempts ran out (but never while a delivery's lease runs). A store
+        failure is logged, never raised: the wake (and the rest of the batch) still goes through."""
         data = n.get("resourceData")
         mid = data.get("id") if isinstance(data, dict) else None
         folder_id = folder_of(sub["resource"])
         if not mid or not folder_id:
             return
-        reset = self.store.arrived_again(sub["key_id"], folder_id, mid)
+        try:
+            reset = self.store.arrived_again(sub["key_id"], folder_id, mid, self.keeper.cfg.drop_lease_s)
+        except Exception as e:  # noqa: BLE001 -- e.g. sqlite busy; the delta round and the lease still work
+            log.warning("created notification: resource=%s message=%s reset failed: %s", sub["resource"], mid, e)
+            return
         log.info("created notification: resource=%s message=%s drop rows reset=%d", sub["resource"], mid, reset)
 
 
@@ -182,7 +187,6 @@ class Waiter:
             scope, folder_id, mode = self.mail.watch_scope(connection_key, poll_args)
         except Exception as e:  # noqa: BLE001 -- the tool never raises
             return self.mail._failure(e)
-        from subscriptions import mail_resource
         resource = mail_resource(folder_id)
         events = self.keeper.ensure(connection_key, resource)
         if events["events"] == "on" and self.listener_error():

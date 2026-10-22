@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fpdf import FPDF
 
-from extract import html_to_text
+from extract import body_text
 
 FONTS = Path(__file__).parent / "fonts"
 FAMILY = "DejaVu"
@@ -93,7 +93,7 @@ def render_mail(mail: dict, inline_images: dict[str, bytes]) -> bytes:
         except Exception:  # noqa: BLE001 -- any HTML the renderer cannot take falls back to its plain text
             pass
     pdf = _page(mail)
-    text = html_to_text(content) if html else content.strip()
+    text = body_text({**body, "content": content})
     if text:
         pdf.multi_cell(0, 5, text, new_x="LMARGIN", new_y="NEXT")
     return bytes(pdf.output())

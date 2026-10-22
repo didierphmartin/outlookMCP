@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import json
+import sqlite3
 import threading
 import time
 
@@ -344,7 +345,7 @@ def test_drop_created_notification_for_an_unknown_message_adds_no_row(fake, svc,
 
 
 def test_drop_created_notification_leaves_new_mode_rows_alone(fake, svc, parts):
-    keeper, _, _, _ = parts
+    keeper, _, _, clock = parts
     new_args = {"folder": "Inbox"}
     svc.poll_new_mail("key-1", new_args)
     watch_drop(svc, keeper, folder="Inbox")
@@ -353,6 +354,7 @@ def test_drop_created_notification_leaves_new_mode_rows_alone(fake, svc, parts):
     assert drop_poll(svc, "Inbox")["mail"]["id"] == mid
     new_scope = svc.watch_scope("key-1", new_args)[0]
     before = [r for r in rows(svc, mid) if r[0] == new_scope]
+    clock.t += 600                                           # the drop delivery's lease has run out
     fake.notify_created(mid)
     assert [r for r in rows(svc, mid) if r[0] == new_scope] == before == [(new_scope, 1, 1, 0, 0)]
     assert svc.poll_new_mail("key-1", new_args) == {"mail": None}      # "new" stays at-most-once
@@ -383,4 +385,41 @@ def test_drop_created_notification_with_a_forged_client_state_resets_nothing(fak
     router.handle({"value": [{"subscriptionId": sub["sub_id"], "clientState": "forged",
                               "changeType": "created", "resourceData": {"id": mid}}]})
     assert router.counts["rejected"] == 1
-    assert drop_poll(svc) == {"mail": None}                  # still delivered, within the lease
+    clock.t += 600
+    assert drop_poll(svc)["mail"]["attempt"] == 2            # the lease retry, not a reset to attempt 1
+
+
+def test_drop_created_notification_right_after_the_claim_redelivers_nothing(fake, svc, parts, caplog):
+    caplog.set_level("INFO", logger="outlook_mcp.events")
+    keeper, _, _, _ = parts
+    watch_drop(svc, keeper)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    assert drop_poll(svc)["mail"]["attempt"] == 1            # claimed: a run is filing it
+    fake.notify_created(mid)                                 # Graph's late / duplicate first-arrival "created"
+    assert drop_poll(svc) == {"mail": None}                  # deliver-once while the lease runs
+    assert any("reset=0" in r.getMessage() for r in caplog.records if r.name == "outlook_mcp.events")
+
+
+def test_drop_created_notification_after_the_lease_rearms_as_attempt_1(fake, svc, parts):
+    keeper, _, _, clock = parts
+    watch_drop(svc, keeper)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    assert drop_poll(svc)["mail"]["attempt"] == 1
+    clock.t += 600
+    fake.notify_created(mid)
+    mail = drop_poll(svc)["mail"]
+    assert mail["id"] == mid and mail["attempt"] == 1
+
+
+def test_drop_created_notification_store_failure_still_wakes(fake, svc, parts, monkeypatch, caplog):
+    keeper, router, wakes, _ = parts
+    folder_id = watch_drop(svc, keeper)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    wakes._take((keeper.store.key_id("key-1"), mail_resource(folder_id)))
+
+    def busy(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(svc.store, "arrived_again", busy)
+    fake.notify_created(mid)
+    assert wakes._take((keeper.store.key_id("key-1"), mail_resource(folder_id)))
+    assert any("database is locked" in r.getMessage() for r in caplog.records if r.name == "outlook_mcp.events")

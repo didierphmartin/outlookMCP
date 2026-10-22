@@ -168,16 +168,20 @@ class Store:
                            "VALUES (?, ?, ?, ?, ?, 1, ?)",
                            [(kid, scope, m, r, int(baseline), int(baseline)) for m, r in items])
 
-    def arrived_again(self, key_id: str, folder_id: str, message_id: str) -> int:
+    def arrived_again(self, key_id: str, folder_id: str, message_id: str, lease_s: float,
+                      max_attempts: int = DROP_MAX_ATTEMPTS) -> int:
         """An email already queued by a drop watch of this folder came into it again (Graph's "created"): its
-        rows start over, as if it had never been seen -- deliverable now, attempt 1. Drop rows are the only
-        ones with in_folder = 1 (enqueue_drop); "new"-mode rows are never touched. No row: nothing is added
-        (the next delta round queues new mail). Returns the number of rows reset."""
+        rows start over -- deliverable now, attempt 1. Only rows that are not mid-run: undelivered, lease run out,
+        attempts exhausted, or baseline. Graph also sends "created" (at least once, maybe after the delta) for a
+        first arrival, and that must not re-deliver an email just claimed. Drop rows are the only ones with
+        in_folder = 1 (enqueue_drop); "new"-mode rows are never touched. No row: nothing is added (the next delta
+        round queues new mail). Returns the number of rows reset."""
         prefix = folder_id + "|"                          # scope = "{folder_id}|{signature}"
         with self._tx() as db:
             return db.execute("UPDATE queue SET delivered = 0, delivered_at = NULL, attempts = 0, baseline = 0 "
-                              "WHERE key_id = ? AND message_id = ? AND in_folder = 1 AND substr(scope, 1, ?) = ?",
-                              (key_id, message_id, len(prefix), prefix)).rowcount
+                              "WHERE key_id = ? AND message_id = ? AND in_folder = 1 AND substr(scope, 1, ?) = ? "
+                              "AND (delivered = 0 OR delivered_at <= ? OR attempts >= ? OR baseline = 1)",
+                              (key_id, message_id, len(prefix), prefix, self._clock() - lease_s, max_attempts)).rowcount
 
     def queued_except(self, connection_key: str, scope: str, keep: set[str]) -> list[str]:
         """Ids of this scope's rows that are not in `keep`."""
