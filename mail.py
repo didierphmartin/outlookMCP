@@ -18,7 +18,7 @@ from extract import attachment_text, body_text
 from graph import GraphError
 
 DELTA_SELECT = "id,from,subject,receivedDateTime,hasAttachments"
-FULL_SELECT = "id,from,toRecipients,ccRecipients,subject,receivedDateTime,body,webLink,hasAttachments"
+FULL_SELECT = "id,from,toRecipients,ccRecipients,subject,receivedDateTime,body,webLink,hasAttachments,parentFolderId"
 ATTACHMENT_META = "attachments($select=id,name,contentType,size)"   # metadata only, never contentBytes
 EMAIL = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
 
@@ -31,8 +31,8 @@ class Message:
         return ((recipient or {}).get("emailAddress") or {}).get("address", "")
 
     @classmethod
-    def shape(cls, m: dict) -> dict:
-        return {"id": m["id"], "from": cls.address(m.get("from")),
+    def shape(cls, m: dict, attempt: int = 1) -> dict:
+        return {"id": m["id"], "attempt": attempt, "from": cls.address(m.get("from")),
                 "to": [cls.address(r) for r in m.get("toRecipients") or []],
                 "cc": [cls.address(r) for r in m.get("ccRecipients") or []],
                 "subject": m.get("subject") or "", "received_at": m.get("receivedDateTime"),
@@ -41,16 +41,27 @@ class Message:
                                  "size": int(a.get("size") or 0)} for a in m.get("attachments") or []]}
 
 
+MODES = ("new", "drop")
+
+
 @dataclass(frozen=True)
 class Filters:
     sender: str = ""
     subject_contains: str = ""
     has_attachments: bool = False
+    mode: str = "new"       # new: mail received after the watch started; drop: any email moved into the folder
 
     @classmethod
     def from_args(cls, args: dict) -> "Filters":
+        mode = str(args.get("mode") or "new").strip().lower()
+        if mode not in MODES:
+            raise GraphError("invalid_argument", f"mode must be new or drop, not {args.get('mode')!r}")
         return cls(str(args.get("from") or "").strip().lower(), str(args.get("subject_contains") or "").strip().lower(),
-                   cls._flag(args.get("has_attachments")))
+                   cls._flag(args.get("has_attachments")), mode)
+
+    @property
+    def drop(self) -> bool:
+        return self.mode == "drop"
 
     @staticmethod
     def _flag(value) -> bool:
@@ -61,7 +72,11 @@ class Filters:
                 return bool(value)
 
     def signature(self) -> str:
-        return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()[:16]
+        """The scope's filter part. "new" leaves the mode out, so scopes made before modes existed keep their queue."""
+        fields = asdict(self)
+        if not self.drop:
+            del fields["mode"]
+        return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:16]
 
     def match(self, m: dict) -> bool:
         return ((not self.sender or self.sender in Message.address(m.get("from")).lower())
@@ -123,6 +138,8 @@ class MailService:
     def _refresh_queue(self, graph, key: str, scope: str, folder_id: str, filters: Filters) -> None:
         """Read the folder's delta since the cursor and queue the matching new messages. The queue (not the
         delta order) decides delivery order; re-sent (changed) messages are already queued and stay ignored."""
+        if filters.drop:
+            return self._refresh_drop_queue(graph, key, scope, folder_id, filters)
         cur = self.store.cursor(key, scope)
         if cur is None:
             # First use of this folder + filter set. The connection's first one starts at the sign-in, so mail
@@ -149,15 +166,42 @@ class MailService:
         self.store.enqueue(key, scope, found)       # before the cursor: a crash re-reads, never loses
         self.store.save_cursor(key, scope, delta_link, since)
 
+    def _refresh_drop_queue(self, graph, key: str, scope: str, folder_id: str, filters: Filters) -> None:
+        """Drop mode: whatever the received date, a matching email that comes into the folder is queued; one that
+        leaves it (@removed) is forgotten, so dragging it back queues it again. The first round only records what
+        is already there (the baseline): it is never delivered."""
+        cur = self.store.cursor(key, scope)
+        baseline = cur is None or not cur["delta_link"]       # no delta round has completed yet
+        fresh = (f"/me/mailFolders/{folder_id}/messages/delta", {"$select": DELTA_SELECT})
+        removed: list[str] = []
+        try:
+            found, delta_link = self._read_delta(graph, *((cur["delta_link"], None) if not baseline else fresh),
+                                                 "", filters, removed)
+        except GraphError as e:
+            if e.code != "sync_state_lost" or baseline:
+                raise
+            # A stale delta link: rescan the whole folder. Rows already queued (the baseline included) are kept
+            # as they are; only emails not queued yet are added, so nothing is delivered twice.
+            removed = []
+            found, delta_link = self._read_delta(graph, *fresh, "", filters, removed)
+        self.store.forget(key, scope, removed)
+        self.store.enqueue_drop(key, scope, found, baseline=baseline)   # before the cursor: a crash re-reads
+        self.store.save_cursor(key, scope, delta_link, cur["since"] if cur else self.now_iso())
+
     @staticmethod
-    def _read_delta(graph, url: str, params: dict | None, since: str, filters: Filters) -> tuple[list, str]:
-        """Every page of one delta round -> ([(id, receivedDateTime) of matching new mail], the next delta link)."""
+    def _read_delta(graph, url: str, params: dict | None, since: str, filters: Filters,
+                    removed: list[str] | None = None) -> tuple[list, str]:
+        """Every page of one delta round -> ([(id, receivedDateTime) of matching new mail], the next delta link).
+        Ids that left the folder are appended to `removed` when it is given."""
         found = []
         while True:
             page = graph.get(url, params)
             params = None
             for m in page.get("value", []):
-                if "@removed" not in m and (m.get("receivedDateTime") or "") >= since and filters.match(m):
+                if "@removed" in m:
+                    if removed is not None:
+                        removed.append(m["id"])
+                elif (m.get("receivedDateTime") or "") >= since and filters.match(m):
                     found.append((m["id"], m["receivedDateTime"]))
             if "@odata.nextLink" not in page:
                 return found, page["@odata.deltaLink"]
@@ -165,13 +209,19 @@ class MailService:
 
     def _scope(self, graph, args: dict) -> tuple[str, str, Filters]:
         filters = Filters.from_args(args)
-        folder_id = self._folder_id(graph, args.get("folder") or "Inbox")
+        # A drop folder is created on first use (the user drags mail into it); a "new" watch names an existing one.
+        folder = str(args.get("folder") or "Inbox").strip().strip("/")
+        folder_id = self._folder_id(graph, folder, [] if filters.drop else None)
         return f"{folder_id}|{filters.signature()}", folder_id, filters
 
-    def watch_scope(self, key: str, args: dict) -> tuple[str, str]:
-        """(queue scope, folder id) of poll_new_mail with these arguments: what wait_for_new watches."""
-        scope, folder_id, _ = self._scope(self._graph(key), args)
-        return scope, folder_id
+    def watch_scope(self, key: str, args: dict) -> tuple[str, str, str]:
+        """(queue scope, folder id, mode) of poll_new_mail with these arguments: what wait_for_new watches."""
+        scope, folder_id, filters = self._scope(self._graph(key), args)
+        return scope, folder_id, filters.mode
+
+    def lease_s(self, mode: str) -> float | None:
+        """The claim lease of a mode: drop re-delivers an email still in the folder; new is at-most-once."""
+        return self.cfg.drop_lease_s if mode == "drop" else None
 
     def _refresh_queue_for_tests(self, key: str, folder: str, args: dict) -> None:
         graph = self._graph(key)
@@ -184,19 +234,26 @@ class MailService:
             graph = self._graph(key)
             scope, folder_id, filters = self._scope(graph, args)
             self._refresh_queue(graph, key, scope, folder_id, filters)
-            while (mid := self.store.claim_next(key, scope)) is not None:
+            while (mid := self.store.claim_next(key, scope, self.lease_s(filters.mode))) is not None:
                 try:
                     m = graph.get(f"/me/messages/{mid}", {"$select": FULL_SELECT, "$expand": ATTACHMENT_META})
                 except Exception as e:
                     match e:
                         case GraphError(code="not_found"):
+                            if filters.drop:
+                                self.store.forget(key, scope, [mid])
                             continue                              # deleted meanwhile: skip it
                         case GraphError() if e.transient or e.code == "reconnect_needed":
                             self.store.release(key, scope, mid)   # never handed out: offer it next poll
                         case httpx.HTTPError() | ValueError():    # the network, or a non-JSON gateway page
                             self.store.release(key, scope, mid)
                     raise                                         # permanent: the message counts as consumed
-                return {"mail": Message.shape(m)}                 # a shape failure is permanent too: consumed
+                if not filters.drop:
+                    return {"mail": Message.shape(m)}             # a shape failure is permanent too: consumed
+                if m.get("parentFolderId") != folder_id:          # left the drop folder since the last delta round
+                    self.store.forget(key, scope, [mid])
+                    continue
+                return {"mail": Message.shape(m, self.store.attempts(key, scope, mid))}
             return {"mail": None}
         except Exception as e:                                      # the tool never raises
             return self._failure(e)

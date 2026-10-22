@@ -242,3 +242,32 @@ def test_waiters_hold_no_worker_thread(fake, http, ecfg):
     assert time.monotonic() - t0 < 2
     for t in threads:
         t.join()
+
+
+# drop mode ---------------------------------------------------------------------------------------
+def test_wait_flat_args_watch_drop_scope(fake, svc, parts, ecfg):
+    keeper, _, wakes, clock = parts
+    waiter = Waiter(svc, keeper, wakes, svc.store, ecfg, clock)
+    flat = {"folder": "To SharePoint", "mode": "drop"}
+    prep = waiter.prepare("key-1", flat)                     # the drop folder is created, not unknown_folder
+    assert "error" not in prep and prep["queued"] is False
+    assert prep["scope"] == waiter.prepare("key-1", {"args": flat})["scope"]
+    assert prep["scope"] == waiter.prepare("key-1", {"folder": "Inbox", "args": flat})["scope"]   # nested wins
+    svc.poll_new_mail("key-1", flat)                         # baseline
+    fake.add_message(folder="To SharePoint", subject="x", received="2026-10-01T08:00:00Z")
+    svc._refresh_queue_for_tests("key-1", "To SharePoint", {"mode": "drop"})
+    prep = waiter.prepare("key-1", flat)
+    assert prep["queued"] is True
+    assert asyncio.run(waiter.wait(prep, 0))["via"] == "pending"
+
+
+def test_wait_ready_when_lease_expired(fake, svc, parts, ecfg):
+    keeper, _, wakes, clock = parts
+    waiter = Waiter(svc, keeper, wakes, svc.store, ecfg, clock)
+    flat = {"folder": "To SharePoint", "mode": "drop"}
+    svc.poll_new_mail("key-1", flat)
+    fake.add_message(folder="To SharePoint", subject="x", received="2026-10-01T08:00:00Z")
+    assert svc.poll_new_mail("key-1", flat)["mail"]["attempt"] == 1
+    assert waiter.prepare("key-1", flat)["queued"] is False
+    clock.t += 600
+    assert waiter.prepare("key-1", flat)["queued"] is True

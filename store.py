@@ -11,6 +11,8 @@ from contextlib import contextmanager
 
 from cryptography.fernet import Fernet
 
+DROP_MAX_ATTEMPTS = 3      # drop mode: deliveries of one email in all (the first + lease retries)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS connections (key_id TEXT PRIMARY KEY, account TEXT, tenant TEXT,
     refresh_token TEXT, connected_at REAL);
@@ -182,7 +184,7 @@ class Store:
                 (max_attempts, self._clock() - lease_s))
 
     def claim_next(self, connection_key: str, scope: str, lease_s: float | None = None,
-                   max_attempts: int = 3) -> str | None:
+                   max_attempts: int = DROP_MAX_ATTEMPTS) -> str | None:
         """Oldest undelivered message, marked delivered in the same transaction. Without lease_s delivery
         is at-most-once by design: a message claimed but lost by the caller is not offered again.
         With lease_s (drop mode) a claimed message that is still in the folder is offered again once the
@@ -203,12 +205,14 @@ class Store:
             return row[0]
 
     def release(self, connection_key: str, scope: str, message_id: str) -> None:
-        """Undo a claim whose message the server itself failed to fetch: it was never handed to anyone."""
-        self._x("UPDATE queue SET delivered = 0, delivered_at = NULL WHERE key_id = ? AND scope = ? AND message_id = ?",
+        """Undo a claim whose message the server itself failed to fetch: it was never handed to anyone,
+        so the attempt does not count either."""
+        self._x("UPDATE queue SET delivered = 0, delivered_at = NULL, attempts = MAX(attempts - 1, 0) "
+                "WHERE key_id = ? AND scope = ? AND message_id = ?",
                 (self.key_id(connection_key), scope, message_id))
 
     def has_undelivered(self, connection_key: str, scope: str, lease_s: float | None = None,
-                        max_attempts: int = 3) -> bool:
+                        max_attempts: int = DROP_MAX_ATTEMPTS) -> bool:
         if lease_s is None:
             cond, args = "delivered = 0", ()
         else:

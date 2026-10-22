@@ -184,3 +184,13 @@ def test_old_database_gets_new_columns(tmp_path):
     s = Store(path, AppConfig.new_secret_key(), clock=lambda: 1000.0)
     s.enqueue_drop("k", "sc", [("m1", "2026-01-01")], baseline=False)
     assert s.claim_next("k", "sc", lease_s=600) == "m1"
+
+
+def test_release_does_not_count_the_attempt(tmp_path):
+    s = make(tmp_path)
+    s.enqueue_drop("k", "sc", [("m1", "2026-01-01")], baseline=False)
+    assert s.claim_next("k", "sc", lease_s=600) == "m1"
+    s.release("k", "sc", "m1")
+    assert s.attempts("k", "sc", "m1") == 0
+    assert s.claim_next("k", "sc", lease_s=600) == "m1"
+    assert s.attempts("k", "sc", "m1") == 1

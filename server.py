@@ -23,12 +23,17 @@ _FAILS = (" On failure: a tool error (isError) whose text is {\"error\": code, \
           "not_connected, reconnect_needed, throttled, not_found, unknown_folder, forbidden, network_error, graph_error, "
           "internal_error.")
 _STR = {"type": "string"}
+_MODE = {"type": "string", "enum": ["new", "drop"],
+         "description": ("new: mail received after the watch started (default); drop: any email moved into the folder, "
+                         "retried while it stays there")}
 _ATTACHMENT = {"type": "object", "properties": {"id": _STR, "name": _STR, "content_type": _STR,
                                                 "size": {"type": "integer", "description": "Bytes"}},
                "required": ["id", "name", "content_type", "size"]}
 _MAIL = {"type": ["object", "null"], "description": "The email, or null when no unseen email matches.",
          "properties": {
              "id": {"type": "string", "description": "The email's id (get_attachment's mail_id)"},
+             "attempt": {"type": "integer", "description": "Which delivery of this email this is: 1, or 2, 3 when a "
+                                                           "drop-mode email stayed in the folder past the lease"},
              "from": {"type": "string", "description": "Sender address"},
              "to": {"type": "array", "items": _STR, "description": "Recipient addresses"},
              "cc": {"type": "array", "items": _STR, "description": "Cc addresses"},
@@ -37,7 +42,7 @@ _MAIL = {"type": ["object", "null"], "description": "The email, or null when no 
              "body_text": {"type": "string", "description": "The body as plain text"},
              "web_link": {"type": "string", "description": "Opens the email in Outlook on the web"},
              "attachments": {"type": "array", "items": _ATTACHMENT, "description": "Listed, never opened"}},
-         "required": ["id", "from", "to", "cc", "subject", "received_at", "body_text", "web_link", "attachments"]}
+         "required": ["id", "attempt", "from", "to", "cc", "subject", "received_at", "body_text", "web_link", "attachments"]}
 TOOLS = [
     {"name": "connect_start",
      "description": ("Start connecting a mailbox. Returns a code the user enters at verification_uri (device sign-in); "
@@ -78,9 +83,13 @@ TOOLS = [
          "required": ["id", "name", "path"]}}}, "required": ["folders"]}},
     {"name": "poll_new_mail",
      "description": ("The next unseen email in the folder that matches the filters, oldest first, or mail=null when there "
-                     "is none. Never returns the same email twice. Attachments are listed, never opened." + _FAILS),
+                     "is none. Never returns the same email twice, except in drop mode: an email still in the folder "
+                     "after DROP_LEASE_S seconds comes again (mail.attempt 2, 3), so move it out once handled. A drop "
+                     "folder is created when missing. Attachments are listed, never opened. Extra error code: "
+                     "invalid_argument." + _FAILS),
      "inputSchema": {"type": "object", "properties": {
          "folder": _FOLDER,
+         "mode": _MODE,
          "from": {"type": "string", "description": "Only mail whose sender address contains this (case-insensitive)."},
          "subject_contains": {"type": "string"},
          "has_attachments": {"type": "boolean"}}},
@@ -131,8 +140,14 @@ TOOLS = [
                      "timeout_s: just wait again. Never returns mail itself. Extra error code: invalid_argument." + _FAILS),
      "inputSchema": {"type": "object", "properties": {
          "poll": {"type": "string", "enum": ["poll_new_mail"], "description": "The poll to wait for. Default poll_new_mail."},
-         "args": {"type": "object", "description": "That poll's arguments, e.g. {\"folder\": \"Inbox\"}: the same folder "
-                                                   "and filters the workflow polls with."},
+         "args": {"type": "object", "description": "That poll's arguments, e.g. {\"folder\": \"Inbox\"}: the same folder, "
+                                                   "mode and filters the workflow polls with. They may also be given "
+                                                   "flat, at the top level; these nested ones win."},
+         "folder": _FOLDER,
+         "mode": _MODE,
+         "from": {"type": "string", "description": "As poll_new_mail's from."},
+         "subject_contains": {"type": "string"},
+         "has_attachments": {"type": "boolean"},
          "timeout_s": {"type": "number", "description": "Longest wait in seconds, at most 150. Default 120."}}},
      "outputSchema": {"type": "object", "properties": {
          "status": {"type": "string", "enum": ["ready", "timeout"]},

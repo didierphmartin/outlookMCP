@@ -219,7 +219,9 @@ class FakeGraph:
                 return httpx.Response(200, json=att) if att else httpx.Response(404, json={})
             case ["me", "messages", mid]:
                 m = self.messages.get(mid)
-                return httpx.Response(200, json=m) if m else httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
+                if m is None:
+                    return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
+                return httpx.Response(200, json={**m, "parentFolderId": m["folder"]})
         return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
 
     def _post(self, path: str, body: dict) -> httpx.Response:

@@ -391,3 +391,132 @@ def test_every_graph_request_asks_for_immutable_ids(fake, svc):
     poll(svc)
     graph = [h for (_, p), h in zip(fake.requests, fake.headers) if "/oauth2/" not in p]
     assert graph and all(h.get("prefer") == 'IdType="ImmutableId"' for h in graph)
+
+
+# drop mode ---------------------------------------------------------------------------------------
+DROP = "To SharePoint"
+
+
+def drop(svc, folder=DROP, **args):
+    return svc.poll_new_mail("key-1", {"folder": folder, "mode": "drop", **args})
+
+
+def move(svc, mid, folder):
+    assert "error" not in svc.move_mail("key-1", {"mail_id": mid, "folder": folder})
+
+
+def queue_rows(svc, mid):
+    return svc.store._x("SELECT message_id FROM queue WHERE message_id = ?", (mid,))
+
+
+def test_drop_old_mail_moved_in_is_delivered(fake, svc):
+    old = fake.add_message(subject="old", received="2026-10-01T08:00:00Z")
+    assert drop(svc) == {"mail": None}                   # baseline round (empty folder, created)
+    move(svc, old, DROP)
+    mail = drop(svc)["mail"]
+    assert mail["id"] == old and mail["attempt"] == 1
+    assert drop(svc) == {"mail": None}
+
+
+def test_drop_baseline_not_delivered(fake, svc):
+    assert drop(svc) == {"mail": None}
+    fake.add_message(folder=DROP, subject="already there", received="2026-10-01T08:00:00Z")
+    svc.store._x("DELETE FROM cursors")                  # a fresh watch: what is there now is the baseline
+    assert drop(svc) == {"mail": None}
+    assert drop(svc) == {"mail": None}
+
+
+def test_drop_read_change_not_redelivered(fake, svc):
+    drop(svc)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    assert drop(svc)["mail"]["id"] == mid
+    fake.touch_message(mid)
+    assert drop(svc) == {"mail": None}                   # within the lease
+
+
+def test_drop_moved_out_and_back_is_delivered_again(fake, svc):
+    drop(svc)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    assert drop(svc)["mail"]["id"] == mid
+    move(svc, mid, "Filed")
+    assert drop(svc) == {"mail": None}
+    assert queue_rows(svc, mid) == []                    # @removed forgets it
+    move(svc, mid, DROP)
+    mail = drop(svc)["mail"]
+    assert mail["id"] == mid and mail["attempt"] == 1
+
+
+def test_drop_lease_redelivers_with_attempt_2(fake, svc):
+    drop(svc)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    assert drop(svc)["mail"]["attempt"] == 1
+    t0 = svc.store._clock()
+    svc.store._clock = lambda: t0 + 599
+    assert drop(svc) == {"mail": None}
+    svc.store._clock = lambda: t0 + 600
+    mail = drop(svc)["mail"]
+    assert mail["id"] == mid and mail["attempt"] == 2
+
+
+def test_drop_claim_skips_mail_no_longer_in_folder(fake, svc):
+    drop(svc)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    svc._refresh_queue_for_tests("key-1", DROP, {"mode": "drop"})   # queued, in_folder
+    fake.messages[mid]["folder"] = "projects-id"         # moved elsewhere, no delta round has seen it
+    assert drop(svc) == {"mail": None}
+    assert queue_rows(svc, mid) == []
+
+
+def test_drop_folder_created_when_missing(fake, svc):
+    assert drop(svc) == {"mail": None}
+    assert [f for f in fake.folders if f["displayName"] == DROP]
+
+
+def test_drop_folder_name_case_and_slash(fake, svc):
+    a = svc.watch_scope("key-1", {"folder": "to sharepoint/", "mode": "drop"})
+    b = svc.watch_scope("key-1", {"folder": "To SharePoint", "mode": "drop"})
+    assert a == b and a[2] == "drop"
+    assert len([f for f in fake.folders if f["displayName"].lower() == "to sharepoint"]) == 1
+
+
+def test_new_and_drop_scopes_are_separate(fake, svc):
+    assert svc.watch_scope("key-1", {"folder": "Inbox"})[0] != svc.watch_scope("key-1", {"folder": "Inbox", "mode": "drop"})[0]
+    assert svc.watch_scope("key-1", {"folder": "Inbox"})[2] == "new"
+    poll(svc)
+    drop(svc, folder="Inbox")
+    fake.add_message(subject="both", received="2026-10-07T10:01:00Z")
+    assert poll(svc)["mail"]["subject"] == "both"
+    assert drop(svc, folder="Inbox")["mail"]["subject"] == "both"
+
+
+def test_bad_mode_is_invalid_argument(fake, svc):
+    assert poll(svc, mode="sometimes")["error"] == "invalid_argument"
+
+
+def test_new_mode_attempt_is_always_1(fake, svc):
+    poll(svc)
+    fake.add_message(subject="x", received="2026-10-07T10:01:00Z")
+    assert poll(svc)["mail"]["attempt"] == 1
+
+
+def test_drop_fetch_failure_does_not_count_an_attempt(fake, svc, monkeypatch):
+    drop(svc)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    _fetch_fails(fake, monkeypatch, mid, lambda: httpx.Response(200, content=b"<html>gateway</html>"), times=1)
+    assert drop(svc)["error"] == "graph_error"
+    mail = drop(svc)["mail"]
+    assert mail["id"] == mid and mail["attempt"] == 1
+
+
+def test_drop_sync_state_lost_keeps_baseline_and_queues_the_rest(fake, svc):
+    base = fake.add_message(folder="Inbox", subject="base", received="2026-10-01T08:00:00Z")
+    drop(svc)
+    move(svc, base, DROP)
+    svc.store._x("DELETE FROM queue")
+    svc.store._x("DELETE FROM cursors")
+    assert drop(svc) == {"mail": None}                   # base is the baseline of this fresh watch
+    new = fake.add_message(folder=DROP, subject="new", received="2026-09-01T08:00:00Z")
+    fake.delta_link_failure = 410
+    mail = drop(svc)["mail"]
+    assert mail["id"] == new and mail["attempt"] == 1
+    assert drop(svc) == {"mail": None}                   # the rescan did not re-deliver the baseline
