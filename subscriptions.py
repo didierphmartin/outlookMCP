@@ -3,6 +3,7 @@ dropped when nobody has waited for a day. One subscription per (connection, fold
 filter set on that folder."""
 from __future__ import annotations
 
+import re
 import secrets
 import threading
 import time
@@ -18,6 +19,12 @@ TICK_S = 15 * 60
 
 def mail_resource(folder_id: str) -> str:
     return f"me/mailFolders('{folder_id}')/messages"
+
+
+def folder_of(resource: str) -> str | None:
+    """The folder id of a mail_resource, None for any other resource."""
+    m = re.fullmatch(r"me/mailFolders\('(.+)'\)/messages", resource or "")
+    return m.group(1) if m else None
 
 
 def iso(epoch: float) -> str:

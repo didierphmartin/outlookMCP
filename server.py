@@ -378,7 +378,13 @@ def _seed(fake, path: str) -> None:
 
 
 def main() -> None:  # pragma: no cover
+    import logging
     import uvicorn
+    ours = logging.getLogger("outlook_mcp")              # this server's own INFO lines, beside uvicorn's
+    ours.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s: %(message)s"))
+    ours.addHandler(handler)
     cfg = AppConfig.from_env()
     uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port)
 

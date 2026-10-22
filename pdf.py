@@ -8,12 +8,14 @@ from pathlib import Path
 
 from fpdf import FPDF
 
-from extract import body_text
+from extract import html_to_text
 
 FONTS = Path(__file__).parent / "fonts"
 FAMILY = "DejaVu"
 CID_IMG = re.compile(r"<img\b[^>]*>", re.I)
 SRC = re.compile(r"""\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
+# Never body text: the renderer would print a <head>'s <style> (Outlook wraps its CSS in a comment) as text.
+NOT_CONTENT = re.compile(r"<!--.*?-->|<(head|style|script)\b[^>]*>.*?</\1\s*>", re.I | re.S)
 
 
 def _addresses(recipients) -> str:
@@ -31,6 +33,11 @@ def _attachment_line(a: dict) -> str:
     if a.get("@odata.type") == "#microsoft.graph.referenceAttachment":     # a link to a cloud file: never filed
         return f"{a.get('name', '')} (cloud link, not stored)"
     return f"{a.get('name', '')} ({round(int(a.get('size') or 0) / 1024)} KB)"
+
+
+def _content_only(html: str) -> str:
+    """The HTML without its <head>, <style>, <script> and comments."""
+    return NOT_CONTENT.sub("", html)
 
 
 def _with_inline_images(html: str, inline_images: dict[str, bytes]) -> str:
@@ -75,7 +82,10 @@ def _page(mail: dict) -> FPDF:
 def render_mail(mail: dict, inline_images: dict[str, bytes]) -> bytes:
     body = mail.get("body") or {}
     content = body.get("content") or ""
-    if (body.get("contentType") or "text").lower() == "html" and content.strip():
+    html = (body.get("contentType") or "text").lower() == "html"
+    if html:
+        content = _content_only(content)
+    if html and content.strip():
         pdf = _page(mail)
         try:
             pdf.write_html(_with_inline_images(content, inline_images), font_family=FAMILY)
@@ -83,7 +93,7 @@ def render_mail(mail: dict, inline_images: dict[str, bytes]) -> bytes:
         except Exception:  # noqa: BLE001 -- any HTML the renderer cannot take falls back to its plain text
             pass
     pdf = _page(mail)
-    text = body_text(body)
+    text = html_to_text(content) if html else content.strip()
     if text:
         pdf.multi_cell(0, 5, text, new_x="LMARGIN", new_y="NEXT")
     return bytes(pdf.output())

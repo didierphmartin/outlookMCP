@@ -120,3 +120,30 @@ def test_fake_rejects_subtype_property_in_select(fake):
     for q in ({"$expand": ["attachments($select=id,contentId)"]}, {"$select": ["id,contentBytes"]}):
         resp = fake._graph(f"/me/messages/{mid}", q)
         assert resp.status_code == 400 and "on type 'microsoft.graph.attachment'" in resp.json()["error"]["message"]
+
+
+OUTLOOK_HTML = ('<html><head>\r\n<meta http-equiv="Content-Type" content="text/html; charset=utf-8">\r\n'
+                '<style type="text/css" style="display:none;"><!-- p {margin-top:0;margin-bottom:0;} --></style>\r\n'
+                '</head>\r\n<body dir="ltr">\r\n<div>Test 90</div>\r\n</body></html>')
+
+
+def test_outlook_head_style_and_comments_are_not_rendered_as_text():
+    t = text_of(render_mail(mail(body={"contentType": "html", "content": OUTLOOK_HTML}), {}))
+    assert "Test 90" in t and "margin" not in t and "<!--" not in t
+
+
+def test_style_script_and_comments_dropped_case_insensitively():
+    html = ('<STYLE>\np { margin:0 }\n</STYLE><Script type="x">var margin = 1;</sCRIPT>'
+            '<!--\n margin note\n--><p>kept</p>')
+    t = text_of(render_mail(mail(body={"contentType": "html", "content": html}), {}))
+    assert "kept" in t and "margin" not in t
+
+
+def test_text_fallback_also_drops_head_style_and_comments(monkeypatch):
+    from fpdf import FPDF
+
+    def refuse(self, *a, **k):
+        raise ValueError("renderer refused")
+    monkeypatch.setattr(FPDF, "write_html", refuse)          # force the plain-text path
+    t = text_of(render_mail(mail(body={"contentType": "html", "content": OUTLOOK_HTML}), {}))
+    assert "Test 90" in t and "margin" not in t

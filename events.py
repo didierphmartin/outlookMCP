@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
+
+
+log = logging.getLogger("outlook_mcp.events")
 
 
 class Wakes:
@@ -85,10 +89,25 @@ class NotificationRouter:
                 self.keeper.recreate(sub)                 # then catch up on what came meanwhile
             case "missed":
                 self.counts["lifecycle"] += 1
+            case None if n.get("changeType") == "created":
+                self._arrived(sub, n)
             case _:
                 pass
         self.counts["woke"] += 1
         self.wakes.set((sub["key_id"], sub["resource"]))
+
+    def _arrived(self, sub: dict, n: dict) -> None:
+        """A "created" notification is an email arriving in the folder now. Dragged out and back between two
+        delta rounds, it shows in the delta only as a change, so its drop rows are reset here: delivered again
+        from attempt 1, even after its attempts ran out."""
+        from subscriptions import folder_of
+        data = n.get("resourceData")
+        mid = data.get("id") if isinstance(data, dict) else None
+        folder_id = folder_of(sub["resource"])
+        if not mid or not folder_id:
+            return
+        reset = self.store.arrived_again(sub["key_id"], folder_id, mid)
+        log.info("created notification: resource=%s message=%s drop rows reset=%d", sub["resource"], mid, reset)
 
 
 class EventHubListener:  # pragma: no cover -- needs a real hub; the router it feeds is tested

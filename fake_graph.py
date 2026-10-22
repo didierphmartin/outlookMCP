@@ -81,7 +81,15 @@ class FakeGraph:
             if sub["folder"] == folder and self.on_notification:
                 self.on_notification({"value": [{"subscriptionId": sid, "clientState": sub["clientState"],
                                                  "changeType": "created", "tenantId": self.tenant,
-                                                 "resource": f"Users/u1/Messages/{mid}"}]})
+                                                 "resource": f"Users/u1/Messages/{mid}",
+                                                 "resourceData": {"@odata.type": "#Microsoft.Graph.Message",
+                                                                  "@odata.id": f"Users/u1/Messages/{mid}",
+                                                                  "id": mid}}]})
+
+    def notify_created(self, mid: str) -> None:
+        """Only the "created" notification of a message already in its folder: Graph sends this when an email
+        is dragged out and back between two delta rounds, which the delta itself collapses into a change."""
+        self._notify(mid)
 
     def lifecycle(self, sid: str, event: str, remove: bool = False) -> None:
         """Graph's lifecycle notification for a subscription (reauthorizationRequired, subscriptionRemoved, missed)."""

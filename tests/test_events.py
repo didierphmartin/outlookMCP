@@ -57,6 +57,8 @@ def test_first_ensure_subscribes_then_reuses(fake, parts):
     assert epoch(body["expirationDateTime"]) <= clock() + MAIL_MAX_MINUTES * 60
     sub = keeper.store.subscription("key-1", INBOX)
     assert sub["sub_id"] in fake.subscriptions and sub["client_state"] == body["clientState"]
+    [prefer] = [h.get("prefer") for (m, p), h in zip(fake.requests, fake.headers) if m == "POST" and p.endswith("/subscriptions")]
+    assert prefer == 'IdType="ImmutableId"'                  # notifications then name messages by their immutable id
 
 
 def test_events_off_without_a_notification_url(fake, svc, cfg):
@@ -271,3 +273,114 @@ def test_wait_ready_when_lease_expired(fake, svc, parts, ecfg):
     assert waiter.prepare("key-1", flat)["queued"] is False
     clock.t += 600
     assert waiter.prepare("key-1", flat)["queued"] is True
+
+
+# drop mode: a "created" notification is the email arriving in the folder now -------------------------
+DROP = "To SharePoint"
+
+
+def drop_poll(svc, folder=DROP):
+    return svc.poll_new_mail("key-1", {"folder": folder, "mode": "drop"})
+
+
+def watch_drop(svc, keeper, folder=DROP):
+    """Baseline round (creates the folder) + the folder's subscription."""
+    assert drop_poll(svc, folder) == {"mail": None}
+    _, folder_id, _ = svc.watch_scope("key-1", {"folder": folder, "mode": "drop"})
+    keeper.ensure("key-1", mail_resource(folder_id))
+    return folder_id
+
+
+def rows(svc, mid):
+    return svc.store._x("SELECT scope, delivered, attempts, baseline, in_folder FROM queue WHERE message_id = ? "
+                        "ORDER BY scope", (mid,))
+
+
+def test_drop_created_notification_delivers_a_baseline_email(fake, svc, parts):
+    keeper, router, wakes, _ = parts
+    drop_poll(svc)                                           # creates the folder
+    mid = fake.add_message(folder=DROP, subject="already there", received="2026-10-01T08:00:00Z")
+    svc.store._x("DELETE FROM cursors")                      # a fresh watch: mid is its baseline
+    folder_id = watch_drop(svc, keeper)
+    assert drop_poll(svc) == {"mail": None}
+    fake.notify_created(mid)                                 # dragged out and back between two delta rounds
+    assert wakes._take((keeper.store.key_id("key-1"), mail_resource(folder_id)))
+    mail = drop_poll(svc)["mail"]
+    assert mail["id"] == mid and mail["attempt"] == 1
+
+
+def test_drop_created_notification_retries_an_exhausted_email(fake, svc, parts):
+    keeper, router, _, clock = parts
+    watch_drop(svc, keeper)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    for attempt in (1, 2, 3):
+        assert drop_poll(svc)["mail"]["attempt"] == attempt
+        clock.t += 600
+    assert drop_poll(svc) == {"mail": None}                  # 3 attempts: left in the folder
+    fake.notify_created(mid)                                 # the user drags it out and back
+    mail = drop_poll(svc)["mail"]
+    assert mail["id"] == mid and mail["attempt"] == 1
+
+
+def test_drop_change_without_notification_redelivers_nothing(fake, svc, parts):
+    keeper, _, _, _ = parts
+    watch_drop(svc, keeper)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    assert drop_poll(svc)["mail"]["attempt"] == 1
+    fake.touch_message(mid)                                  # read / flagged: no "created" notification
+    assert drop_poll(svc) == {"mail": None}
+
+
+def test_drop_created_notification_for_an_unknown_message_adds_no_row(fake, svc, parts, caplog):
+    caplog.set_level("INFO", logger="outlook_mcp.events")
+    keeper, router, _, _ = parts
+    folder_id = watch_drop(svc, keeper)
+    sub = keeper.store.subscription("key-1", mail_resource(folder_id))
+    router.handle({"value": [{"subscriptionId": sub["sub_id"], "clientState": sub["client_state"],
+                              "changeType": "created", "resourceData": {"id": "never-seen"}}]})
+    assert rows(svc, "never-seen") == [] and router.counts["woke"] == 1
+    [line] = [r.getMessage() for r in caplog.records if r.name == "outlook_mcp.events"]
+    assert f"resource={sub['resource']}" in line and "message=never-seen" in line and "reset=0" in line
+
+
+def test_drop_created_notification_leaves_new_mode_rows_alone(fake, svc, parts):
+    keeper, _, _, _ = parts
+    new_args = {"folder": "Inbox"}
+    svc.poll_new_mail("key-1", new_args)
+    watch_drop(svc, keeper, folder="Inbox")
+    mid = fake.add_message(subject="both", received="2026-10-07T10:01:00Z")
+    assert svc.poll_new_mail("key-1", new_args)["mail"]["id"] == mid
+    assert drop_poll(svc, "Inbox")["mail"]["id"] == mid
+    new_scope = svc.watch_scope("key-1", new_args)[0]
+    before = [r for r in rows(svc, mid) if r[0] == new_scope]
+    fake.notify_created(mid)
+    assert [r for r in rows(svc, mid) if r[0] == new_scope] == before == [(new_scope, 1, 1, 0, 0)]
+    assert svc.poll_new_mail("key-1", new_args) == {"mail": None}      # "new" stays at-most-once
+    assert drop_poll(svc, "Inbox")["mail"]["attempt"] == 1
+
+
+def test_drop_created_notification_only_resets_its_own_folder(fake, svc, parts):
+    keeper, _, _, _ = parts
+    watch_drop(svc, keeper)
+    other = "Other drop"
+    drop_poll(svc, other)                                    # a drop watch of another folder, no subscription
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    assert drop_poll(svc)["mail"]["attempt"] == 1
+    other_id = svc.watch_scope("key-1", {"folder": other, "mode": "drop"})[1]
+    other_scope = svc.watch_scope("key-1", {"folder": other, "mode": "drop"})[0]
+    svc.store.enqueue_drop("key-1", other_scope, [(mid, "2026-10-01T08:00:00Z")], baseline=True)
+    fake.notify_created(mid)
+    assert (other_scope, 1, 0, 1, 1) in rows(svc, mid)        # the other folder's row is untouched
+    assert other_id != svc.watch_scope("key-1", {"folder": DROP, "mode": "drop"})[1]
+
+
+def test_drop_created_notification_with_a_forged_client_state_resets_nothing(fake, svc, parts):
+    keeper, router, _, clock = parts
+    folder_id = watch_drop(svc, keeper)
+    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    assert drop_poll(svc)["mail"]["attempt"] == 1
+    sub = keeper.store.subscription("key-1", mail_resource(folder_id))
+    router.handle({"value": [{"subscriptionId": sub["sub_id"], "clientState": "forged",
+                              "changeType": "created", "resourceData": {"id": mid}}]})
+    assert router.counts["rejected"] == 1
+    assert drop_poll(svc) == {"mail": None}                  # still delivered, within the lease
