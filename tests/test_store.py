@@ -118,3 +118,79 @@ def test_x_returns_rows_fetched_under_the_lock(tmp_path):
     s = make(tmp_path)
     s.create_connect("c1", {}, expires_at=2000)
     assert s._x("SELECT connect_id FROM connects") == [("c1",)]
+
+
+def test_drop_baseline_never_claimed(tmp_path):
+    s = make(tmp_path)
+    s.enqueue_drop("k", "sc", [("m1", "2026-01-01")], baseline=True)
+    assert s.claim_next("k", "sc", lease_s=600) is None
+    assert s.has_undelivered("k", "sc", lease_s=600) is False
+
+
+def test_drop_claim_then_lease_redelivers(tmp_path):
+    now = [0.0]
+    s = make(tmp_path, clock=lambda: now[0])
+    s.enqueue_drop("k", "sc", [("m1", "2026-01-01")], baseline=False)
+    assert s.claim_next("k", "sc", lease_s=600) == "m1"
+    now[0] = 599
+    assert s.claim_next("k", "sc", lease_s=600) is None
+    now[0] = 600
+    assert s.claim_next("k", "sc", lease_s=600) == "m1"
+    assert s.attempts("k", "sc", "m1") == 2
+
+
+def test_drop_stops_after_three_attempts(tmp_path):
+    now = [0.0]
+    s = make(tmp_path, clock=lambda: now[0])
+    s.enqueue_drop("k", "sc", [("m1", "2026-01-01")], baseline=False)
+    for t in (0, 600, 1200):
+        now[0] = t
+        assert s.claim_next("k", "sc", lease_s=600) == "m1"
+    now[0] = 1800
+    assert s.claim_next("k", "sc", lease_s=600) is None
+    assert s.has_undelivered("k", "sc", lease_s=600) is False
+
+
+def test_forget_then_reenqueue_restarts_attempts(tmp_path):
+    s = make(tmp_path)
+    s.enqueue_drop("k", "sc", [("m1", "2026-01-01")], baseline=False)
+    assert s.claim_next("k", "sc", lease_s=600) == "m1"
+    s.forget("k", "sc", ["m1"])
+    s.enqueue_drop("k", "sc", [("m1", "2026-01-01")], baseline=False)
+    assert s.claim_next("k", "sc", lease_s=600) == "m1"
+    assert s.attempts("k", "sc", "m1") == 1
+
+
+def test_prune_keeps_rows_in_folder(tmp_path):
+    now = [0.0]
+    s = make(tmp_path, clock=lambda: now[0])
+    s.enqueue_drop("k", "sc", [("m1", "2026-01-01")], baseline=False)
+    s.enqueue("k", "sc", [("m2", "2026-01-02")])
+    assert s.claim_next("k", "sc", lease_s=600) == "m1"
+    assert s.claim_next("k", "sc") == "m2"
+    now[0] = 100 * 86400
+    s.prune(30)
+    assert s.attempts("k", "sc", "m1") == 1
+    assert s.attempts("k", "sc", "m2") == 0  # pruned: row gone
+
+
+def test_old_database_gets_new_columns(tmp_path):
+    path = str(tmp_path / "old.sqlite")
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE queue (key_id TEXT, scope TEXT, message_id TEXT, received_at TEXT, "
+               "delivered INTEGER DEFAULT 0, delivered_at REAL, PRIMARY KEY (key_id, scope, message_id))")
+    db.commit()
+    db.close()
+    s = Store(path, AppConfig.new_secret_key(), clock=lambda: 1000.0)
+    s.enqueue_drop("k", "sc", [("m1", "2026-01-01")], baseline=False)
+    assert s.claim_next("k", "sc", lease_s=600) == "m1"
+
+
+def test_release_does_not_count_the_attempt(tmp_path):
+    s = make(tmp_path)
+    s.enqueue_drop("k", "sc", [("m1", "2026-01-01")], baseline=False)
+    assert s.claim_next("k", "sc", lease_s=600) == "m1"
+    s.release("k", "sc", "m1")
+    assert s.attempts("k", "sc", "m1") == 0
+    assert s.claim_next("k", "sc", lease_s=600) == "m1"
+    assert s.attempts("k", "sc", "m1") == 1

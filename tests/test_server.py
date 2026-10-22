@@ -75,7 +75,7 @@ def test_tools_list_echoes_id_on_both_routes(fake, http, cfg):
     c = app(fake, http, cfg)
     for path, req_id in (("/", 7), ("/mcp", "abc")):
         r = c.post(path, json={"jsonrpc": "2.0", "id": req_id, "method": "tools/list"}).json()
-        assert r["id"] == req_id and len(r["result"]["tools"]) == 9
+        assert r["id"] == req_id and len(r["result"]["tools"]) == 10
 
 
 # errors at the tool boundary -------------------------------------------------------------

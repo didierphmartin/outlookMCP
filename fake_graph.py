@@ -47,6 +47,9 @@ class FakeGraph:
         self.on_notification = None
         self.subscription_status: int | None = None   # POST /subscriptions answers this error status instead
         self.clock = time.time                         # "now" for the subscription expiry limit
+        # How GET /me/messages/<id> writes parentFolderId (None: the folder id as is). Real Graph may answer it
+        # in another id form than the mailFolders lookup.
+        self.parent_folder_id_form = None
 
     # test controls -------------------------------------------------------------
     def add_message(self, folder="inbox", subject="", sender="a@b.c", received="2026-10-07T10:00:00Z",
@@ -54,10 +57,15 @@ class FakeGraph:
         seq = next(self._seq)
         mid = f"m{seq}"
         atts = []
-        for i, (name, ctype, data) in enumerate(attachments):
+        for i, (name, ctype, data, *flags) in enumerate(attachments):
+            # flags: inline, item (attached email), contentId, reference (a cloud link: no content to download)
+            inline, item, cid, ref = (list(flags) + [False, False, None, False])[:4]
             aid = f"{mid}-a{i}"
             self.attachments[aid] = data
-            atts.append({"id": aid, "name": name, "contentType": ctype, "size": len(data)})
+            kind = "referenceAttachment" if ref else "itemAttachment" if item else "fileAttachment"
+            atts.append({"@odata.type": "#microsoft.graph." + kind,
+                         "id": aid, "name": name, "contentType": ctype, "size": len(data), "isInline": bool(inline),
+                         **({"contentId": cid} if cid else {})})
         self.messages[mid] = {"id": mid, "seq": seq, "folder": self._folder_id(folder), "subject": subject,
                               "from": {"emailAddress": {"address": sender}},
                               "toRecipients": [{"emailAddress": {"address": self.account}}], "ccRecipients": [],
@@ -73,7 +81,15 @@ class FakeGraph:
             if sub["folder"] == folder and self.on_notification:
                 self.on_notification({"value": [{"subscriptionId": sid, "clientState": sub["clientState"],
                                                  "changeType": "created", "tenantId": self.tenant,
-                                                 "resource": f"Users/u1/Messages/{mid}"}]})
+                                                 "resource": f"Users/u1/Messages/{mid}",
+                                                 "resourceData": {"@odata.type": "#Microsoft.Graph.Message",
+                                                                  "@odata.id": f"Users/u1/Messages/{mid}",
+                                                                  "id": mid}}]})
+
+    def notify_created(self, mid: str) -> None:
+        """Only the "created" notification of a message already in its folder: Graph sends this when an email
+        is dragged out and back between two delta rounds, which the delta itself collapses into a change."""
+        self._notify(mid)
 
     def lifecycle(self, sid: str, event: str, remove: bool = False) -> None:
         """Graph's lifecycle notification for a subscription (reauthorizationRequired, subscriptionRemoved, missed)."""
@@ -193,7 +209,40 @@ class FakeGraph:
             case _:
                 return self._oauth_error("unsupported_grant_type")
 
+    # Properties that exist only on a subtype of microsoft.graph.attachment: real Graph rejects them in a
+    # $select on the base type (top level or inside $expand=attachments(...)).
+    SUBTYPE_ONLY = ("contentId", "contentBytes", "sourceUrl", "item")
+
+    @classmethod
+    def _bad_select(cls, q: dict) -> httpx.Response | None:
+        import re
+        selects = list(q.get("$select", []))
+        for e in q.get("$expand", []):
+            m = re.fullmatch(r"attachments\(\$select=([^)]*)\)", e)
+            if m:
+                selects.append(m.group(1))
+        for sel in selects:
+            for prop in sel.split(","):
+                if prop.strip() in cls.SUBTYPE_ONLY:
+                    return httpx.Response(400, json={"error": {"code": "BadRequest", "message":
+                        f"Parsing OData Select and Expand failed: Could not find a property named '{prop.strip()}' "
+                        "on type 'microsoft.graph.attachment'."}})
+        return None
+
+    @staticmethod
+    def _expanded(att: dict, q: dict) -> dict:
+        """An attachment as $expand=attachments($select=...) returns it: only the selected properties."""
+        import re
+        for e in q.get("$expand", []):
+            m = re.fullmatch(r"attachments\(\$select=([^)]*)\)", e)
+            if m:
+                keep = set(m.group(1).split(",")) | {"@odata.type"}
+                return {k: v for k, v in att.items() if k in keep}
+        return att
+
     def _graph(self, path: str, q: dict) -> httpx.Response:
+        if (bad := self._bad_select(q)):
+            return bad
         parts = path.strip("/").split("/")
         match parts:
             case ["me"]:
@@ -211,15 +260,32 @@ class FakeGraph:
                 return httpx.Response(200, json=f) if f else httpx.Response(404, json={"error": {"code": "ErrorFolderNotFound"}})
             case ["me", "mailFolders", fid, "messages", "delta"]:
                 return self._delta(self._folder_id(fid), q)
+            case ["me", "mailFolders", fid, "messages", mid]:
+                m = self.messages.get(mid)
+                if m is None or m["folder"] != self._folder_id(fid):
+                    return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
+                return httpx.Response(200, json={"id": mid})
             case ["me", "messages", mid, "attachments", aid, "$value"]:
+                att = next((a for a in self.messages.get(mid, {}).get("attachments", []) if a["id"] == aid), {})
+                if att.get("@odata.type") == "#microsoft.graph.referenceAttachment":    # a link: nothing to download
+                    return httpx.Response(400, json={"error": {"code": "ErrorInvalidRequest"}})
                 return httpx.Response(200, content=self.attachments[aid])
             case ["me", "messages", mid, "attachments", aid]:
                 m = self.messages.get(mid)
                 att = next((a for a in (m or {}).get("attachments", []) if a["id"] == aid), None)
-                return httpx.Response(200, json=att) if att else httpx.Response(404, json={})
+                if not att:
+                    return httpx.Response(404, json={})
+                full = {**att, "contentBytes": base64.b64encode(self.attachments[aid]).decode()} \
+                    if att["@odata.type"].endswith("fileAttachment") else att
+                return httpx.Response(200, json=full)
             case ["me", "messages", mid]:
                 m = self.messages.get(mid)
-                return httpx.Response(200, json=m) if m else httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
+                if m is None:
+                    return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
+                form = self.parent_folder_id_form or (lambda fid: fid)
+                out = {**m, "parentFolderId": form(m["folder"])}
+                out["attachments"] = [self._expanded(a, q) for a in m["attachments"]]
+                return httpx.Response(200, json=out)
         return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
 
     def _post(self, path: str, body: dict) -> httpx.Response:
@@ -263,7 +329,8 @@ class FakeGraph:
                    if m["folder"] == fid and m["seq"] > after and m["receivedDateTime"] >= since]
         changes = [{k: v for k, v in m.items() if k in ("id", "from", "subject", "receivedDateTime", "hasAttachments")}
                    for m in changes]
-        changes += [{"id": mid, "@removed": {"reason": "deleted"}} for seq, f, mid in self.removed if f == fid and seq > after]
+        if "$deltatoken" in q:                            # like real Graph, a first (token-less) round lists no removals
+            changes += [{"id": mid, "@removed": {"reason": "deleted"}} for seq, f, mid in self.removed if f == fid and seq > after]
         page, rest = changes[skip:skip + 2], changes[skip + 2:]
         base = f"https://graph.microsoft.com/v1.0/me/mailFolders/{fid}/messages/delta"
         keep_filter = "&$filter=" + quote(f"receivedDateTime ge {since}") if since else ""

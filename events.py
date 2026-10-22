@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
+
+from subscriptions import folder_of, mail_resource
+
+log = logging.getLogger("outlook_mcp.events")
 
 
 class Wakes:
@@ -85,10 +90,29 @@ class NotificationRouter:
                 self.keeper.recreate(sub)                 # then catch up on what came meanwhile
             case "missed":
                 self.counts["lifecycle"] += 1
+            case None if n.get("changeType") == "created":
+                self._arrived(sub, n)
             case _:
                 pass
         self.counts["woke"] += 1
         self.wakes.set((sub["key_id"], sub["resource"]))
+
+    def _arrived(self, sub: dict, n: dict) -> None:
+        """A "created" notification is an email arriving in the folder now. Dragged out and back between two
+        delta rounds, it shows in the delta only as a change, so its drop rows are reset here: delivered again
+        from attempt 1, even after its attempts ran out (but never while a delivery's lease runs). A store
+        failure is logged, never raised: the wake (and the rest of the batch) still goes through."""
+        data = n.get("resourceData")
+        mid = data.get("id") if isinstance(data, dict) else None
+        folder_id = folder_of(sub["resource"])
+        if not mid or not folder_id:
+            return
+        try:
+            reset = self.store.arrived_again(sub["key_id"], folder_id, mid, self.keeper.cfg.drop_lease_s)
+        except Exception as e:  # noqa: BLE001 -- e.g. sqlite busy; the delta round and the lease still work
+            log.warning("created notification: resource=%s message=%s reset failed: %s", sub["resource"], mid, e)
+            return
+        log.info("created notification: resource=%s message=%s drop rows reset=%d", sub["resource"], mid, reset)
 
 
 class EventHubListener:  # pragma: no cover -- needs a real hub; the router it feeds is tested
@@ -135,13 +159,14 @@ class EventHubListener:  # pragma: no cover -- needs a real hub; the router it f
             self.client.close()
 
 
+POLL_ARGS = ("folder", "mode", "from", "subject_contains", "has_attachments")   # accepted flat by wait_for_new
 MAX_WAIT_S = 150          # under the 180 s tool timeout of gpt's compiled scripts
 DEFAULT_WAIT_S = 120
 
 
 class Waiter:
     """wait_for_new: answers ready when a notification arrived for the poll's folder, when undelivered mail
-    is already queued, or when the safety poll is due; timeout otherwise. Never returns mail itself."""
+    is already queued (in drop mode: or a delivered one's lease has run out), or when the safety poll is due; timeout otherwise. Never returns mail itself."""
 
     def __init__(self, mail, keeper, wakes: Wakes, store, cfg, clock):
         self.mail, self.keeper, self.wakes, self.store, self.cfg, self.clock = mail, keeper, wakes, store, cfg, clock
@@ -153,21 +178,22 @@ class Waiter:
         poll = args.get("poll") or "poll_new_mail"
         if poll != "poll_new_mail":
             return {"error": "invalid_argument", "message": f"poll must be poll_new_mail, not {poll!r}"}
-        poll_args = args.get("args") or {}
-        if not isinstance(poll_args, dict):
+        nested = args.get("args") or {}
+        if not isinstance(nested, dict):
             return {"error": "invalid_argument", "message": "args must be an object: poll_new_mail's arguments"}
+        # The poll's arguments may also come flat, at the top level; the nested ones win.
+        poll_args = {**{k: args[k] for k in POLL_ARGS if k in args}, **nested}
         try:
-            scope, folder_id = self.mail.watch_scope(connection_key, poll_args)
+            scope, folder_id, mode = self.mail.watch_scope(connection_key, poll_args)
         except Exception as e:  # noqa: BLE001 -- the tool never raises
             return self.mail._failure(e)
-        from subscriptions import mail_resource
         resource = mail_resource(folder_id)
         events = self.keeper.ensure(connection_key, resource)
         if events["events"] == "on" and self.listener_error():
             events = {"events": "off", "reason": "event hub: " + self.listener_error()}
         kid = self.store.key_id(connection_key)
         return {"key": (kid, resource), "scope": (kid, scope), "events": events,
-                "queued": self.store.has_undelivered(connection_key, scope)}
+                "queued": self.store.has_undelivered(connection_key, scope, self.mail.lease_s(mode))}
 
     async def wait(self, prep: dict, timeout_s) -> dict:
         try:

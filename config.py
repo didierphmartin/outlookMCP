@@ -28,6 +28,7 @@ class AppConfig:
     eventhub_consumer_group: str = "$Default"
     notification_url: str = ""          # EventHub:https://<ns>.servicebus.windows.net/eventhubname/<hub>?tenantId=<tenant>
     watch_fallback_s: int = 900         # wait_for_new is ready at least this often, events or not
+    drop_lease_s: int = 600             # drop mode: a delivered email still in the folder after this is delivered again
 
     @property
     def events_enabled(self) -> bool:
@@ -63,4 +64,5 @@ class AppConfig:
             eventhub_consumer_group=env.get("EVENTHUB_CONSUMER_GROUP") or "$Default",
             notification_url=env.get("EVENTHUB_NOTIFICATION_URL", ""),
             watch_fallback_s=int(env.get("WATCH_FALLBACK_S") or "900"),
+            drop_lease_s=int(env.get("DROP_LEASE_S") or "600"),
         )
