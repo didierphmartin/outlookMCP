@@ -388,13 +388,19 @@ class MailService:
         mid = quote(str(args.get("mail_id") or ""), safe="")
         try:
             graph = self._graph(key)
+            # contentId lives only on fileAttachment: the base-type $select must not name it (Graph answers 400)
             m = graph.get(f"/me/messages/{mid}", {"$select": "from,toRecipients,ccRecipients,subject,receivedDateTime,body",
-                                                  "$expand": "attachments($select=id,name,contentType,size,isInline,contentId)"})
+                                                  "$expand": ATTACHMENT_META})
             inline = {}
             for a in m.get("attachments") or []:
-                if a.get("isInline") and a.get("contentId") and a.get("@odata.type") not in ATTACHMENT_KINDS \
+                if a.get("isInline") and a.get("@odata.type") not in ATTACHMENT_KINDS \
+                        and str(a.get("contentType") or "").lower().startswith("image/") \
                         and int(a.get("size") or 0) <= self.cfg.attachment_max_bytes:
-                    inline[a["contentId"]] = graph.get_bytes(f"/me/messages/{mid}/attachments/{quote(a['id'], safe='')}/$value")
+                    full = graph.get(f"/me/messages/{mid}/attachments/{quote(a['id'], safe='')}")   # has contentId + contentBytes
+                    if full.get("contentId") and full.get("contentBytes"):
+                        data = base64.b64decode(full["contentBytes"])
+                        if len(data) <= self.cfg.attachment_max_bytes:
+                            inline[full["contentId"]] = data
         except Exception as e:
             return self._failure(e)
         try:

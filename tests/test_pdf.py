@@ -94,3 +94,29 @@ def test_tool_lists_cloud_link_attachments_as_not_stored(svc, fake):
                                                       ("a.txt", "text/plain", b"abc")])
     t = text_of(base64.b64decode(svc.mail_to_pdf("key-1", {"mail_id": mid})["base64"]))
     assert "Budget.xlsx (cloud link, not stored)" in t and "a.txt" in t
+
+
+def test_tool_embeds_inline_image_with_graph_valid_requests(svc, fake):
+    """Real Graph rejects contentId in a base-type $select (400): contentId and bytes come from the attachment GET."""
+    mid = fake.add_message(subject="Hi", attachments=[("logo.png", "image/png", png(), True, False, "c1"),
+                                                      ("a.txt", "text/plain", b"abc")],
+                           body_html='<p>x</p><img src="cid:c1">')
+    out = svc.mail_to_pdf("key-1", {"mail_id": mid})
+    assert "error" not in out, out
+    assert len(PdfReader(io.BytesIO(base64.b64decode(out["base64"]))).pages[0].images) == 1
+    assert not any(f"{mid}-a1" in p for _, p in fake.requests)      # a non-inline attachment is never fetched
+
+
+def test_tool_skips_oversized_inline_image(svc, fake):
+    mid = fake.add_message(subject="Hi", attachments=[("logo.png", "image/png", png(), True, False, "c1")],
+                           body_html='<img src="cid:c1">')
+    object.__setattr__(svc.cfg, "attachment_max_bytes", 10)      # AppConfig is frozen
+    out = svc.mail_to_pdf("key-1", {"mail_id": mid})
+    assert len(PdfReader(io.BytesIO(base64.b64decode(out["base64"]))).pages[0].images) == 0
+
+
+def test_fake_rejects_subtype_property_in_select(fake):
+    mid = fake.add_message(subject="Hi")
+    for q in ({"$expand": ["attachments($select=id,contentId)"]}, {"$select": ["id,contentBytes"]}):
+        resp = fake._graph(f"/me/messages/{mid}", q)
+        assert resp.status_code == 400 and "on type 'microsoft.graph.attachment'" in resp.json()["error"]["message"]

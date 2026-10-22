@@ -201,7 +201,40 @@ class FakeGraph:
             case _:
                 return self._oauth_error("unsupported_grant_type")
 
+    # Properties that exist only on a subtype of microsoft.graph.attachment: real Graph rejects them in a
+    # $select on the base type (top level or inside $expand=attachments(...)).
+    SUBTYPE_ONLY = ("contentId", "contentBytes", "sourceUrl", "item")
+
+    @classmethod
+    def _bad_select(cls, q: dict) -> httpx.Response | None:
+        import re
+        selects = list(q.get("$select", []))
+        for e in q.get("$expand", []):
+            m = re.fullmatch(r"attachments\(\$select=([^)]*)\)", e)
+            if m:
+                selects.append(m.group(1))
+        for sel in selects:
+            for prop in sel.split(","):
+                if prop.strip() in cls.SUBTYPE_ONLY:
+                    return httpx.Response(400, json={"error": {"code": "BadRequest", "message":
+                        f"Parsing OData Select and Expand failed: Could not find a property named '{prop.strip()}' "
+                        "on type 'microsoft.graph.attachment'."}})
+        return None
+
+    @staticmethod
+    def _expanded(att: dict, q: dict) -> dict:
+        """An attachment as $expand=attachments($select=...) returns it: only the selected properties."""
+        import re
+        for e in q.get("$expand", []):
+            m = re.fullmatch(r"attachments\(\$select=([^)]*)\)", e)
+            if m:
+                keep = set(m.group(1).split(",")) | {"@odata.type"}
+                return {k: v for k, v in att.items() if k in keep}
+        return att
+
     def _graph(self, path: str, q: dict) -> httpx.Response:
+        if (bad := self._bad_select(q)):
+            return bad
         parts = path.strip("/").split("/")
         match parts:
             case ["me"]:
@@ -232,13 +265,19 @@ class FakeGraph:
             case ["me", "messages", mid, "attachments", aid]:
                 m = self.messages.get(mid)
                 att = next((a for a in (m or {}).get("attachments", []) if a["id"] == aid), None)
-                return httpx.Response(200, json=att) if att else httpx.Response(404, json={})
+                if not att:
+                    return httpx.Response(404, json={})
+                full = {**att, "contentBytes": base64.b64encode(self.attachments[aid]).decode()} \
+                    if att["@odata.type"].endswith("fileAttachment") else att
+                return httpx.Response(200, json=full)
             case ["me", "messages", mid]:
                 m = self.messages.get(mid)
                 if m is None:
                     return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
                 form = self.parent_folder_id_form or (lambda fid: fid)
-                return httpx.Response(200, json={**m, "parentFolderId": form(m["folder"])})
+                out = {**m, "parentFolderId": form(m["folder"])}
+                out["attachments"] = [self._expanded(a, q) for a in m["attachments"]]
+                return httpx.Response(200, json=out)
         return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
 
     def _post(self, path: str, body: dict) -> httpx.Response:
