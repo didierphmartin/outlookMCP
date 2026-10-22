@@ -109,6 +109,17 @@ TOOLS = [
          "text": {"type": "string", "description": "The content as text, when convertible"},
          "base64": {"type": "string", "description": "The raw content, when not convertible to text"}},
          "required": ["name", "content_type", "size"]}},
+    {"name": "mail_to_pdf",
+     "description": ("Render one email as a single PDF: a header (From, To, Cc, Date, Subject, Attachments) then the body, "
+                     "inline images included. Attachments are not merged into it: fetch each with get_attachment raw=true. "
+                     "Extra error code: render_failed." + _FAILS),
+     "inputSchema": {"type": "object", "properties": {"mail_id": {"type": "string", "description": "poll_new_mail's mail.id"}},
+                     "required": ["mail_id"]},
+     "outputSchema": {"type": "object", "properties": {
+         "name": {"type": "string", "description": "Always Email.pdf"},
+         "size": {"type": "integer", "description": "Bytes"},
+         "base64": {"type": "string", "description": "The PDF"}},
+         "required": ["name", "size", "base64"]}},
     {"name": "move_mail",
      "description": ("File an email into a folder, e.g. 'Dispatched/Sales'. Missing folders along the path are created. "
                      "The email keeps its id, so later steps (get_attachment, forward_mail) still work. Do not move mail "
@@ -236,7 +247,7 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
                 return connector.start(args.get("method") or "device")
             case "connect_status":
                 return connector.status(str(args.get("connect_id") or ""))
-            case "whoami" | "list_folders" | "poll_new_mail" | "get_attachment" | "move_mail" | "forward_mail":
+            case "whoami" | "list_folders" | "poll_new_mail" | "get_attachment" | "move_mail" | "forward_mail" | "mail_to_pdf":
                 if (failed := connection_error(account_key)) is not None:
                     return failed
                 return getattr(mail, name)(account_key, args)

@@ -16,6 +16,7 @@ from cryptography.fernet import InvalidToken
 from auth import AuthError
 from extract import attachment_text, body_text
 from graph import GraphError
+from pdf import render_mail
 
 DELTA_SELECT = "id,from,subject,receivedDateTime,hasAttachments"
 FULL_SELECT = "id,from,toRecipients,ccRecipients,subject,receivedDateTime,body,webLink,hasAttachments,parentFolderId"
@@ -359,3 +360,23 @@ class MailService:
         if text is None:
             return {"name": name, "content_type": ctype, "size": size, "base64": base64.b64encode(data).decode()}
         return {"name": name, "content_type": ctype, "size": size, "text": text}
+
+    def mail_to_pdf(self, key: str, args: dict) -> dict:
+        """The email as one PDF (header, body, inline images). Attachments are not merged: get_attachment raw has them."""
+        mid = quote(str(args.get("mail_id") or ""), safe="")
+        try:
+            graph = self._graph(key)
+            m = graph.get(f"/me/messages/{mid}", {"$select": "from,toRecipients,ccRecipients,subject,receivedDateTime,body",
+                                                  "$expand": "attachments($select=id,name,contentType,size,isInline,contentId)"})
+            inline = {}
+            for a in m.get("attachments") or []:
+                if a.get("isInline") and a.get("contentId") and a.get("@odata.type") != ITEM_ATTACHMENT \
+                        and int(a.get("size") or 0) <= self.cfg.attachment_max_bytes:
+                    inline[a["contentId"]] = graph.get_bytes(f"/me/messages/{mid}/attachments/{quote(a['id'], safe='')}/$value")
+        except Exception as e:
+            return self._failure(e)
+        try:
+            data = render_mail(m, inline)
+        except Exception as e:  # noqa: BLE001 -- even the text fallback failed
+            return {"error": "render_failed", "message": f"{type(e).__name__}: {e}"[:200]}
+        return {"name": "Email.pdf", "size": len(data), "base64": base64.b64encode(data).decode()}

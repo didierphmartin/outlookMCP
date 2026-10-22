@@ -54,12 +54,13 @@ class FakeGraph:
         seq = next(self._seq)
         mid = f"m{seq}"
         atts = []
-        for i, (name, ctype, data, *flags) in enumerate(attachments):   # flags: inline, item (attached email)
-            inline, item = (list(flags) + [False, False])[:2]
+        for i, (name, ctype, data, *flags) in enumerate(attachments):   # flags: inline, item (attached email), contentId
+            inline, item, cid = (list(flags) + [False, False, None])[:3]
             aid = f"{mid}-a{i}"
             self.attachments[aid] = data
             atts.append({"@odata.type": "#microsoft.graph." + ("itemAttachment" if item else "fileAttachment"),
-                         "id": aid, "name": name, "contentType": ctype, "size": len(data), "isInline": bool(inline)})
+                         "id": aid, "name": name, "contentType": ctype, "size": len(data), "isInline": bool(inline),
+                         **({"contentId": cid} if cid else {})})
         self.messages[mid] = {"id": mid, "seq": seq, "folder": self._folder_id(folder), "subject": subject,
                               "from": {"emailAddress": {"address": sender}},
                               "toRecipients": [{"emailAddress": {"address": self.account}}], "ccRecipients": [],
