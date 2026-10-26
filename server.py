@@ -47,7 +47,11 @@ _MAIL = {"type": ["object", "null"], "description": "The email, or null when no 
              "received_at": {"type": "string", "description": "ISO 8601 UTC, e.g. 2026-10-09T08:15:00Z"},
              "body_text": {"type": "string", "description": "The body as plain text"},
              "web_link": {"type": "string", "description": "Opens the email in Outlook on the web"},
-             "attachments": {"type": "array", "items": _ATTACHMENT, "description": "Listed, never opened"}},
+             "attachments": {"type": "array", "items": _ATTACHMENT, "description": "Listed, never opened"},
+             "mailbox": {"type": "string", "description": "Organization connections only: the address of the "
+                                                          "mailbox the email is in"},
+             "mailbox_name": {"type": "string", "description": "Organization connections only: that mailbox's "
+                                                               "display name, safe and unique as a folder name"}},
          "required": ["id", "attempt", "from", "to", "cc", "subject", "received_at", "body_text", "web_link", "attachments"]}
 TOOLS = [
     {"name": "connect_start",
@@ -79,11 +83,16 @@ TOOLS = [
                                    "(otherwise reconnect_needed)." + _FAILS,
      "inputSchema": {"type": "object", "properties": {}},
      "outputSchema": {"type": "object", "properties": {
-         "account": {"type": "string", "description": "The mailbox address"}, "tenant": _STR,
-         "connected_at": {"type": "number", "description": "When it was connected, Unix seconds"}},
+         "account": {"type": "string", "description": "The mailbox address (an organization connection: the group's name)"},
+         "tenant": _STR,
+         "connected_at": {"type": "number", "description": "When it was connected, Unix seconds"},
+         "mailboxes": {"type": "integer", "description": "Organization connections only: the group's mailboxes"}},
          "required": ["account", "tenant", "connected_at"]}},
-    {"name": "list_folders", "description": "The mailbox's mail folders and their direct subfolders." + _FAILS,
-     "inputSchema": {"type": "object", "properties": {}},
+    {"name": "list_folders", "description": "The mailbox's mail folders and their direct subfolders. Extra error code: "
+                                            "invalid_argument." + _FAILS,
+     "inputSchema": {"type": "object", "properties": {
+         "mailbox": {"type": "string", "description": "Organization connections (required there): the address or id "
+                                                     "of one of the group's mailboxes"}}},
      "outputSchema": {"type": "object", "properties": {"folders": {"type": "array", "items": {
          "type": "object", "properties": {"id": _STR, "name": _STR,
                                           "path": {"type": "string", "description": "e.g. Inbox/Invoices (poll_new_mail's folder)"}},
@@ -238,7 +247,7 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
         tokens = app_tokens if conn and conn["kind"] == "organization" else TokenSource(auth, store, key, clock=now)
         return GraphClient(http, cfg.graph_base, tokens, sleep=sleep)
 
-    mail = MailService(graph_for, store, cfg)
+    mail = MailService(graph_for, store, cfg, clock=now)
     # No Store.prune here: forgetting delivered ids could re-deliver old mail that delta sends again.
     keeper = SubscriptionKeeper(store, mail._graph, cfg, clock=now)
     wakes = Wakes()

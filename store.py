@@ -232,6 +232,32 @@ class Store:
                        (self._clock(), kid, scope, row[0]))
             return row[0]
 
+    def claim_next_of(self, connection_key: str, scopes: list[str], lease_s: float | None = None,
+                      max_attempts: int = DROP_MAX_ATTEMPTS) -> tuple[str, str] | None:
+        """claim_next across several scopes (an organization's mailboxes): (scope, message id) of the oldest."""
+        if not scopes:
+            return None
+        kid = self.key_id(connection_key)
+        cond, args = ("delivered = 0", ()) if lease_s is None else self._drop_due(lease_s, max_attempts)
+        with self._tx() as db:
+            row = db.execute(f"SELECT scope, message_id FROM queue WHERE key_id = ? AND scope IN "
+                             f"({', '.join('?' * len(scopes))}) AND {cond} ORDER BY received_at, message_id LIMIT 1",
+                             (kid, *scopes, *args)).fetchone()
+            if not row:
+                return None
+            db.execute("UPDATE queue SET delivered = 1, delivered_at = ?, attempts = attempts + 1 "
+                       "WHERE key_id = ? AND scope = ? AND message_id = ?", (self._clock(), kid, *row))
+            return row[0], row[1]
+
+    def purge_scope_prefix(self, connection_key: str, prefix: str) -> int:
+        """Forget the queue rows and cursors of every scope starting with `prefix` (a mailbox that left the group).
+        Delivered rows go too: if the mailbox comes back, its drop folder is read afresh, with no baseline.
+        Returns the number of queue rows removed."""
+        kid, n = self.key_id(connection_key), len(prefix)
+        with self._tx() as db:
+            db.execute("DELETE FROM cursors WHERE key_id = ? AND substr(scope, 1, ?) = ?", (kid, n, prefix))
+            return db.execute("DELETE FROM queue WHERE key_id = ? AND substr(scope, 1, ?) = ?", (kid, n, prefix)).rowcount
+
     def release(self, connection_key: str, scope: str, message_id: str) -> None:
         """Undo a claim whose message the server itself failed to fetch: it was never handed to anyone,
         so the attempt does not count either."""
