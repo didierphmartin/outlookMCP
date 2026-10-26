@@ -236,8 +236,8 @@ the Exchange Administrator role). About 20 minutes.
    granted in Entra and in Exchange are a union, so an unscoped `Mail.Read`/`Mail.ReadWrite` in Entra
    cancels the scope and opens every mailbox.
 3. **The VIP group:** a mail-enabled security group "SynergyAI VIP" with the VIPs as members. Only
-   direct members are in scope (Microsoft: nested group members are out of scope). Only direct members count:
-   nested groups are not followed (Exchange's scope ignores them too); keep the VIP group flat. Microsoft 365 groups,
+   direct members are in scope (Microsoft: nested group members are out of scope): nested groups are not
+   followed (Exchange's scope ignores them too); keep the VIP group flat. Microsoft 365 groups,
    mail-enabled security groups and distribution lists are supported as scope groups.
 4. **Exchange Online PowerShell** (after `Connect-ExchangeOnline`):
 
@@ -281,6 +281,12 @@ the Exchange Administrator role). About 20 minutes.
    `OUTLOOK_ORG_FALLBACK_S` (default 60) is optional: an organization watch is ready at least this often,
    events or not. The organization connection is offered only when the four variables are set. Then, in
    the app, Connect, "Connect the organization's VIP mailboxes".
+
+**`forward_mail` is refused** (`forbidden`) on an organization connection: `Application Mail.ReadWrite`
+excludes sending mail.
+
+**Folder names:** a VIP's `mailbox_name` (the folder their files land in) is their display name; when a
+member with the same name joins, both become `Name (address)`, which moves where their later files land.
 
 ### Check it (L0)
 
