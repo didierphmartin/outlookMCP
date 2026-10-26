@@ -212,6 +212,88 @@ In fake mode events are on without a hub: a fake message added to a watched fold
 
 `./smoke.sh` runs an end-to-end check in fake mode on port 8779.
 
+## 8. Organization connection (VIP mailboxes)
+
+One app-only connection reaches the mailboxes of every member of one Entra group ("SynergyAI VIP") and no
+other mailbox. The scope is enforced by Exchange itself (RBAC for Applications), not by this server.
+Adding or removing a VIP is a change of the group's members; nothing else.
+
+Source: Microsoft Learn, "Role Based Access Control for Applications in Exchange Online"
+(<https://learn.microsoft.com/exchange/permissions-exo/application-rbac>, linked from
+<https://learn.microsoft.com/graph/auth-limit-mailbox-access>; page dated 2025-11-25, read 2026-10-26).
+Every cmdlet and parameter below was compared with it.
+
+### Admin procedure (once)
+
+Needs a Microsoft 365 administrator in the Exchange "Organization Management" role group (and, in Entra,
+the Exchange Administrator role). About 20 minutes.
+
+1. **App registration** (Entra admin center, App registrations, New registration), "SynergyAI Mail Drop",
+   single tenant. Note the Application (client) id and the tenant id. Certificates & secrets, New client
+   secret; note it.
+2. **One Graph permission:** API permissions, Microsoft Graph, Application permissions,
+   `GroupMember.Read.All`, then Grant admin consent. **Add no Mail permission here.** Microsoft: permissions
+   granted in Entra and in Exchange are a union, so an unscoped `Mail.Read`/`Mail.ReadWrite` in Entra
+   cancels the scope and opens every mailbox.
+3. **The VIP group:** a mail-enabled security group "SynergyAI VIP" with the VIPs as members. Only
+   direct members are in scope (Microsoft: nested group members are out of scope). Microsoft 365 groups,
+   mail-enabled security groups and distribution lists are supported as scope groups.
+4. **Exchange Online PowerShell** (after `Connect-ExchangeOnline`):
+
+   ```powershell
+   # The ids come from Entra, Enterprise applications (not App registrations: the Object ID differs there);
+   # or: Get-MgServicePrincipal -Filter "appId eq '<client id>'"
+   $sp = Get-MgServicePrincipal -Filter "appId eq '<client id>'"
+   New-ServicePrincipal -AppId <client id> -ObjectId $sp.Id -DisplayName "SynergyAI Mail Drop"
+   $dn = (Get-Group "SynergyAI VIP").DistinguishedName
+   New-ManagementScope -Name "SynergyAI VIP" -RecipientRestrictionFilter "MemberOfGroup -eq '$dn'"
+   New-ManagementRoleAssignment -App <client id> -Role "Application Mail.ReadWrite" -CustomResourceScope "SynergyAI VIP"
+   Test-ServicePrincipalAuthorization -Identity <client id> -Resource <a VIP address>       # InScope: True
+   Test-ServicePrincipalAuthorization -Identity <client id> -Resource <a non-VIP address>   # InScope: False
+   ```
+
+   Checked against the page: all four cmdlets and their parameters match (`New-ServicePrincipal -AppId
+   -ObjectId -DisplayName`; `New-ManagementScope -Name -RecipientRestrictionFilter`;
+   `New-ManagementRoleAssignment -App -Role -CustomResourceScope`; `Test-ServicePrincipalAuthorization
+   -Identity -Resource`). `-App` accepts the object id, app id or display name. `MemberOfGroup` takes the
+   group's distinguished name, as above. `Application Mail.ReadWrite` is a listed role (create, read,
+   update, delete mail; it does not include sending mail). Changes take 30 minutes to 2 hours to apply
+   (the cache of an idle app resets after 30 minutes, an active one lives up to 2 hours); the Test cmdlet
+   bypasses that cache, so it answers at once while real calls may lag.
+
+   **Change-notification subscriptions:** the page lists no separate role for Graph subscriptions and does
+   not mention them. Subscriptions on mail are read access to the folder, and `Application Mail.ReadWrite`
+   includes `Mail.Read`; no extra "Application Mail.Read" assignment is documented as required. This is
+   not confirmed by Microsoft's page; live check L1 (an app-only subscription on a VIP folder delivers
+   through Event Hubs) is what settles it. If subscribing is refused, the safety poll
+   (`OUTLOOK_ORG_FALLBACK_S`) still delivers.
+5. **Hand over** the tenant id, client id, client secret and group id (object id) to whoever runs this
+   server. They go into `.env`:
+
+   | Variable | Value |
+   |---|---|
+   | `OUTLOOK_ORG_TENANT` | tenant id |
+   | `OUTLOOK_ORG_CLIENT_ID` | client id of "SynergyAI Mail Drop" |
+   | `OUTLOOK_ORG_CLIENT_SECRET` | the client secret |
+   | `OUTLOOK_ORG_GROUP` | object id of the "SynergyAI VIP" group |
+
+   `OUTLOOK_ORG_FALLBACK_S` (default 60) is optional: an organization watch is ready at least this often,
+   events or not. The organization connection is offered only when the four variables are set. Then, in
+   the app, Connect, "Connect the organization's VIP mailboxes".
+
+### Check it (L0)
+
+After the 30 minutes to 2 hours, with the four variables in `.env`:
+
+```bash
+.venv/bin/python org_check.py <vip-address> <non-vip-address>
+```
+
+It prints only `token: ok`, `group: <n> members`, `vip: ok|<error code>` and
+`non-vip: refused|READABLE (scope not applied)` (never the secret or a token) and exits 0 only when the VIP's
+mail folders are readable and the non-VIP's are refused. `READABLE` means an Entra Mail permission is still
+granted (step 2) or the scope is wrong.
+
 ## Tests
 
 ```bash
