@@ -1,6 +1,7 @@
 """An organization connection: poll_new_mail and the mail tools across the group's mailboxes."""
 import sqlite3
 
+import httpx
 import pytest
 
 from mailboxes import Mailbox, MailboxDirectory
@@ -49,6 +50,7 @@ def test_mail_carries_mailbox_and_name(fake, org):
     mail = call(c, "poll_new_mail", DROP, key=key)["mail"]
     assert mail["mailbox"] == "bob@contoso.com" and mail["mailbox_name"] == "Bob Stone"
     assert mail["to"] == ["bob@contoso.com"] and mail["attempt"] == 1
+    assert any(m == "GET" and p.startswith("/v1.0/users/u-bob/mailFolders") for m, p in fake.requests)
 
 
 def test_move_mail_acts_on_the_right_mailbox(fake, org):
@@ -107,6 +109,46 @@ def test_forbidden_mailbox_on_the_first_watch_does_not_fail_it(fake, org):
     assert call(c, "poll_new_mail", DROP, key=key) == {"mail": None}
     b = fake.add_message(folder="To SharePoint", subject="bob", mailbox="u-bob")
     assert call(c, "poll_new_mail", DROP, key=key)["mail"]["id"] == f"u-bob~{b}"
+    fake.forbid_mailbox("u-bob")                                           # every member out of reach: an error
+    assert call(c, "poll_new_mail", DROP, key=key)["error"] == "forbidden"
+
+
+def test_one_broken_mailbox_never_stops_the_others(fake, org):
+    """Alice is throttled (429 twice), Bob has no "Projects" folder (unknown_folder): Carol's mail still comes."""
+    c, key = org
+    fake.add_mailbox("u-carol", "carol@contoso.com", "Carol")
+    select = fake._select_mailbox
+
+    def broken(path):
+        if path.startswith("/users/u-alice/"):
+            return httpx.Response(429, headers={"Retry-After": "0"}, json={"error": {"code": "TooManyRequests"}})
+        if path.startswith("/users/u-bob/mailFolders"):
+            return httpx.Response(200, json={"value": []}) if path.endswith("/mailFolders") \
+                else httpx.Response(404, json={"error": {"code": "ErrorFolderNotFound"}})
+        return select(path)
+    fake._select_mailbox = broken
+    new = {"folder": "Projects"}
+    assert call(c, "poll_new_mail", new, key=key) == {"mail": None}
+    m = fake.add_message(folder="projects-id", subject="carol", received="2099-01-01T00:00:00Z", mailbox="u-carol")
+    fake.add_message(folder="projects-id", subject="alice", received="2099-01-01T00:00:00Z", mailbox="u-alice")
+    assert call(c, "poll_new_mail", new, key=key)["mail"]["id"] == f"u-carol~{m}"
+    assert call(c, "poll_new_mail", new, key=key) == {"mail": None}
+
+
+def test_baseline_until_a_first_round_reaches_every_mailbox(fake, org):
+    c, key = org
+    fake.folders.append({"id": "drop-id", "displayName": "To SharePoint"})
+    fake.add_message(folder="drop-id", subject="alice's old", mailbox="u-alice")
+    fake.add_message(folder="drop-id", subject="bob's old", mailbox="u-bob")
+    fake.forbid_mailbox("u-bob")
+    assert call(c, "poll_new_mail", DROP, key=key) == {"mail": None}       # Alice baselined, Bob skipped
+    fake.forbidden_mailboxes.discard("u-bob")
+    assert call(c, "poll_new_mail", DROP, key=key) == {"mail": None}       # no complete round yet: Bob baselined
+    fake.add_mailbox("u-carol", "carol@contoso.com", "Carol")
+    carol = fake.add_message(folder="drop-id", subject="carol's old", mailbox="u-carol")
+    later(c)
+    assert call(c, "poll_new_mail", DROP, key=key)["mail"]["id"] == f"u-carol~{carol}"
+    assert call(c, "poll_new_mail", DROP, key=key) == {"mail": None}
 
 
 def test_opaque_id_of_removed_mailbox_is_an_error_result(fake, org):
@@ -116,12 +158,13 @@ def test_opaque_id_of_removed_mailbox_is_an_error_result(fake, org):
     mail = call(c, "poll_new_mail", DROP, key=key)["mail"]
     fake.mailboxes["u-bob"]["in_group"] = False
     later(c)
+    seen = len(fake.requests)
     for tool, extra in (("move_mail", {"folder": "Filed"}), ("forward_mail", {"to": "x@y.com"}),
                         ("get_attachment", {"attachment_id": "a"}), ("mail_to_pdf", {})):
         r = call(c, tool, {"mail_id": mail["id"], **extra}, key=key)
-        assert r["error"] in ("forbidden", "not_found"), (tool, r)
+        assert r["error"] == "forbidden", (tool, r)
     assert fake.messages[b]["folder"] == drop_folder(fake)
-    assert not any(m == "POST" and "/users/u-bob/" in p for m, p in fake.requests)
+    assert not any("/users/u-bob/" in p for _, p in fake.requests[seen:])
     assert call(c, "move_mail", {"mail_id": b, "folder": "Filed"}, key=key)["error"] == "invalid_argument"   # no mailbox part
 
 

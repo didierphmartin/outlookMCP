@@ -35,8 +35,11 @@ class Store:
         self._db.execute("PRAGMA busy_timeout=5000")
         self._db.executescript(SCHEMA)
         have = {r[1] for r in self._db.execute("PRAGMA table_info(queue)")}
-        if "kind" not in {r[1] for r in self._db.execute("PRAGMA table_info(connections)")}:
+        conn_cols = {r[1] for r in self._db.execute("PRAGMA table_info(connections)")}
+        if "kind" not in conn_cols:
             self._db.execute("ALTER TABLE connections ADD COLUMN kind TEXT DEFAULT 'user'")
+        if "first_round_at" not in conn_cols:      # organization: when a poll round first reached every mailbox
+            self._db.execute("ALTER TABLE connections ADD COLUMN first_round_at REAL")
         for col in ("attempts", "in_folder", "baseline"):
             if col not in have:
                 self._db.execute(f"ALTER TABLE queue ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -94,6 +97,15 @@ class Store:
             return None
         return {"account": row[0], "tenant": row[1], "refresh_token": self._dec(row[2]) if row[2] else "",
                 "connected_at": row[3], "kind": row[4] or "user"}
+
+    def first_round_done(self, connection_key: str) -> bool:
+        """Has an organization poll round reached every member mailbox yet? Until then, new scopes are baselines."""
+        row = self._one("SELECT first_round_at FROM connections WHERE key_id = ?", (self.key_id(connection_key),))
+        return bool(row and row[0] is not None)
+
+    def mark_first_round(self, connection_key: str) -> None:
+        self._x("UPDATE connections SET first_round_at = ? WHERE key_id = ? AND first_round_at IS NULL",
+                (self._clock(), self.key_id(connection_key)))
 
     def update_refresh_token(self, connection_key: str, refresh_token: str) -> None:
         self._x("UPDATE connections SET refresh_token = ? WHERE key_id = ?",

@@ -28,7 +28,6 @@ REFERENCE_ATTACHMENT = "#microsoft.graph.referenceAttachment"      # a cloud lin
 ATTACHMENT_KINDS = {ITEM_ATTACHMENT: "item", REFERENCE_ATTACHMENT: "reference"}   # anything else is a file
 ATTACHMENT_META = "attachments($select=id,name,contentType,size,isInline)"   # metadata only, never contentBytes
 EMAIL = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
-SKIPPED_MAILBOX = ("forbidden", "not_found")   # an organization mailbox out of reach: skipped, the others go on
 
 log = logging.getLogger("outlook_mcp.mail")
 
@@ -193,7 +192,8 @@ class MailService:
                        first: bool | None = None) -> None:
         """Read the folder's delta since the cursor and queue the matching new messages. The queue (not the
         delta order) decides delivery order; re-sent (changed) messages are already queued and stay ignored.
-        `first`: is this the connection's first watch (None: it is when the connection has no cursor yet)."""
+        `first`: is this the connection's first watch (None: it is when the connection has no cursor yet; an
+        organization passes "no poll round has reached every mailbox yet")."""
         if filters.drop:
             return self._refresh_drop_queue(graph, key, scope, folder_id, filters, root, first)
         cur = self.store.cursor(key, scope)
@@ -226,8 +226,9 @@ class MailService:
                             first: bool | None = None) -> None:
         """Drop mode: whatever the received date, a matching email that comes into the folder is queued; one that
         leaves it (@removed) is forgotten, so dragging it back queues it again. The first round only records what
-        is already there (the baseline): it is never delivered. With `first` given (an organization), only the
-        connection's first watch has a baseline: a mailbox seen later has all its folder delivered."""
+        is already there (the baseline): it is never delivered. With `first` given (an organization), only scopes
+        first read before a round reached every mailbox have a baseline: a mailbox seen later has all its folder
+        delivered."""
         cur = self.store.cursor(key, scope)
         fresh_round = cur is None or not cur["delta_link"]    # no delta round has completed yet
         baseline = fresh_round if first is None else fresh_round and first
@@ -312,21 +313,30 @@ class MailService:
             return self._failure(e)
 
     def _poll_organization(self, key: str, args: dict) -> dict:
-        """Every member mailbox's folder is refreshed, then the oldest email of them all is claimed. A mailbox out
-        of reach (403/404: left the Exchange scope, no licence) is logged and skipped; the others go on."""
+        """Every member mailbox's folder is refreshed, then the oldest email of them all is claimed. One mailbox's
+        failure (403/404 out of scope, a missing folder, throttling, the network) is logged and that mailbox
+        skipped; the others go on. Raised only when it is the connection's (reconnect_needed) or every one failed."""
         graph, filters = self._graph(key), Filters.from_args(args)
-        first = not self.store.has_cursor(key)       # the connection's first watch: the folders' content is the baseline
+        # Until a round has reached every mailbox, what is already in a newly read folder is the baseline.
+        first = not self.store.first_round_done(key)
+        members = self.directory(key).members()
         watched: dict[str, tuple[Mailbox, str]] = {}  # scope -> (mailbox, folder id)
-        for box in self.directory(key).members():
+        failed: list[Exception] = []
+        for box in members:
             try:
                 scope, folder_id = self._org_scope(graph, key, box, args, filters)
                 self._refresh_queue(graph, key, scope, folder_id, filters, self._root(key, box.id), first)
-            except GraphError as e:
-                if e.code not in SKIPPED_MAILBOX:
+            except (GraphError, httpx.HTTPError, ValueError) as e:
+                if isinstance(e, GraphError) and e.code == "reconnect_needed":
                     raise
-                log.warning("mailbox %s (%s) skipped: %s: %s", box.mail, box.id, e.code, e.message[:200])
+                failed.append(e)
+                log.warning("mailbox %s (%s) skipped: %s", box.mail, box.id, self._failure(e))
                 continue
             watched[scope] = (box, folder_id)
+        if failed and not watched:
+            raise failed[0]
+        if first and watched and not failed:        # an empty group has reached nobody yet
+            self.store.mark_first_round(key)
         while (got := self.store.claim_next_of(key, list(watched), self.lease_s(filters.mode))) is not None:
             scope, mid = got
             box, folder_id = watched[scope]
