@@ -86,9 +86,13 @@ class Store:
                 (self.key_id(connection_key), account, tenant, self._enc(refresh_token), self._clock()))
 
     def save_org_connection(self, connection_key: str, group: str, tenant: str) -> None:
-        """An organization connection: app-only, so no refresh token. `group` is the group's display name."""
-        self._x("INSERT OR REPLACE INTO connections (key_id, account, tenant, refresh_token, connected_at, kind) "
-                "VALUES (?, ?, ?, NULL, ?, 'organization')", (self.key_id(connection_key), group, tenant, self._clock()))
+        """An organization connection: app-only, so no refresh token. `group` is the group's display name.
+        A re-Connect (an earlier organization connection of the same tenant and group already had its first
+        round) inherits that first round, so its drop folders are not baselined again."""
+        self._x("INSERT OR REPLACE INTO connections (key_id, account, tenant, refresh_token, connected_at, kind, first_round_at) "
+                "VALUES (?, ?, ?, NULL, ?, 'organization', (SELECT MIN(first_round_at) FROM connections "
+                "WHERE kind = 'organization' AND tenant = ? AND account = ?))",
+                (self.key_id(connection_key), group, tenant, self._clock(), tenant, group))
 
     def connection(self, connection_key: str) -> dict | None:
         row = self._one("SELECT account, tenant, refresh_token, connected_at, kind FROM connections WHERE key_id = ?",

@@ -89,3 +89,35 @@ def test_user_device_connect_unchanged(fake, http, cfg):
     key = connect(c, fake)
     assert rows(cfg) == [("me@contoso.com", "user")]
     assert call(c, "whoami", {}, key=key).get("error") is None
+
+
+def test_reconnect_keeps_the_first_round_so_drop_folders_are_not_baselined_again(fake, http, org_cfg):
+    fake.add_mailbox("u-alice", "alice@contoso.com", "Alice")
+    c = app(fake, http, org_cfg)
+
+    def connect_org():
+        s = call(c, "connect_start", {"method": "organization"})
+        return call(c, "connect_status", {"connect_id": s["connect_id"]})["connection_key"]
+    drop = {"folder": "To SharePoint", "mode": "drop"}
+    first = connect_org()
+    assert call(c, "poll_new_mail", drop, key=first) == {"mail": None}      # the first round: a baseline
+    mid = fake.add_message(folder="To SharePoint", subject="dropped after the first round", mailbox="u-alice")
+    second = connect_org()                                                    # re-Connect: a new key
+    assert call(c, "poll_new_mail", drop, key=second)["mail"]["id"] == f"u-alice~{mid}"
+    marks = sqlite3.connect(org_cfg.db_path).execute("SELECT first_round_at FROM connections").fetchall()
+    assert len(marks) == 2 and marks[0] == marks[1] and marks[0][0] is not None
+
+
+def test_first_connect_of_another_tenant_is_still_a_baseline(fake, http, org_cfg):
+    fake.add_mailbox("u-alice", "alice@contoso.com", "Alice")
+    c = app(fake, http, org_cfg)
+    s = call(c, "connect_start", {"method": "organization"})
+    key = call(c, "connect_status", {"connect_id": s["connect_id"]})["connection_key"]
+    call(c, "poll_new_mail", {"folder": "To SharePoint", "mode": "drop"}, key=key)
+    db = sqlite3.connect(org_cfg.db_path)
+    db.execute("UPDATE connections SET tenant = 'other-tenant'")
+    db.commit()
+    fake.add_message(folder="To SharePoint", subject="already there", mailbox="u-alice")
+    s = call(c, "connect_start", {"method": "organization"})
+    key = call(c, "connect_status", {"connect_id": s["connect_id"]})["connection_key"]
+    assert call(c, "poll_new_mail", {"folder": "To SharePoint", "mode": "drop"}, key=key) == {"mail": None}
