@@ -53,6 +53,8 @@ class FakeGraph:
         # An organization (app-only) connection: several mailboxes and one group. The /me mailbox above is the
         # default (mailbox None); the others answer under users/{id}. An app token is refused on /me.
         self.group_id = "vip-group"
+        self.group_name = "VIP Mailboxes"
+        self.app_secret: str | None = None          # when set, client_credentials needs this client_secret
         self.mailboxes: dict[str, dict] = {}       # user id -> {mail, displayName, in_group}
         self.app_tokens: set[str] = set()
         self.forbidden_mailboxes: set[str] = set()
@@ -265,6 +267,8 @@ class FakeGraph:
                     return self._oauth_error("invalid_grant", "AADSTS70008: The refresh token has expired.")
                 return self._tokens_response()
             case "client_credentials":
+                if self.app_secret is not None and form.get("client_secret", [""])[0] != self.app_secret:
+                    return self._oauth_error("invalid_client", "AADSTS7000215: Invalid client secret provided.")
                 if form.get("scope", [""])[0] != "https://graph.microsoft.com/.default":
                     return self._oauth_error("invalid_scope")
                 at = f"APP{next(self._tokens)}"
@@ -310,6 +314,8 @@ class FakeGraph:
         if (bad := self._bad_select(q)):
             return bad
         parts = path.strip("/").split("/")
+        if parts == ["groups", self.group_id]:
+            return httpx.Response(200, json={"id": self.group_id, "displayName": self.group_name})
         if parts == ["groups", self.group_id, "transitiveMembers", "microsoft.graph.user"]:
             return self._members(q)
         parts = self._mine(parts)

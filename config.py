@@ -29,6 +29,16 @@ class AppConfig:
     notification_url: str = ""          # EventHub:https://<ns>.servicebus.windows.net/eventhubname/<hub>?tenantId=<tenant>
     watch_fallback_s: int = 900         # wait_for_new is ready at least this often, events or not
     drop_lease_s: int = 600             # drop mode: a delivered email still in the folder after this is delivered again
+    # Organization connection: app-only (client credentials) access to every mailbox of one Entra group.
+    org_tenant: str = ""
+    org_client_id: str = ""
+    org_client_secret: str = ""
+    org_group: str = ""                 # object id of the group whose members' mailboxes are reachable
+    org_fallback_s: int = 60            # an organization watch is ready at least this often, events or not
+
+    @property
+    def org_enabled(self) -> bool:
+        return all((self.org_tenant, self.org_client_id, self.org_client_secret, self.org_group))
 
     @property
     def events_enabled(self) -> bool:
@@ -65,4 +75,9 @@ class AppConfig:
             notification_url=env.get("EVENTHUB_NOTIFICATION_URL", ""),
             watch_fallback_s=int(env.get("WATCH_FALLBACK_S") or "900"),
             drop_lease_s=int(env.get("DROP_LEASE_S") or "600"),
+            org_tenant=env.get("OUTLOOK_ORG_TENANT", ""),
+            org_client_id=env.get("OUTLOOK_ORG_CLIENT_ID", ""),
+            org_client_secret=env.get("OUTLOOK_ORG_CLIENT_SECRET", ""),
+            org_group=env.get("OUTLOOK_ORG_GROUP", ""),
+            org_fallback_s=int(env.get("OUTLOOK_ORG_FALLBACK_S") or "60"),
         )

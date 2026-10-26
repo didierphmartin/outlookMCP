@@ -105,6 +105,8 @@ class Connector:
         self.auth, self.store, self.http, self.cfg, self.clock = auth, store, http, cfg, clock
 
     def start(self, method: str = "device") -> dict:
+        if method == "organization":
+            return self._start_organization()
         d = self.auth.device_start()
         connect_id = secrets.token_urlsafe(16)
         self.store.create_connect(connect_id, {"device_code": d["device_code"], "interval": int(d.get("interval", 5)),
@@ -114,6 +116,27 @@ class Connector:
         if self.cfg.public_url:     # offered up front: a tenant may refuse the code on Microsoft's page without telling us
             out["redirect_url"] = self._start_url(connect_id)
         return out
+
+    def _start_organization(self) -> dict:
+        """App-only connect: prove the credentials and GroupMember.Read.All, then connect at once."""
+        from graph import AppTokenSource, GraphClient, GraphError
+        cfg = self.cfg
+        if not cfg.org_enabled:
+            return {"error": "not_configured", "message": "set OUTLOOK_ORG_TENANT, OUTLOOK_ORG_CLIENT_ID, "
+                    "OUTLOOK_ORG_CLIENT_SECRET and OUTLOOK_ORG_GROUP on the Outlook server to enable the organization connection"}
+        graph = GraphClient(self.http, cfg.graph_base, AppTokenSource(self.http, cfg, clock=self.clock))
+        try:
+            graph.get(f"/groups/{cfg.org_group}/transitiveMembers/microsoft.graph.user", {"$top": "1", "$select": "id"})
+            name = graph.get(f"/groups/{cfg.org_group}", {"$select": "displayName"}).get("displayName") or cfg.org_group
+        except GraphError as e:
+            return {"error": e.code, "message": e.message or str(e)}
+        except (httpx.HTTPError, ValueError) as e:
+            return {"error": "network_error", "message": f"{type(e).__name__}: {e}"[:200]}
+        connect_id, key = secrets.token_urlsafe(16), secrets.token_urlsafe(32)
+        self.store.create_connect(connect_id, {"organization": True}, expires_at=self.clock() + self.BROWSER_SIGN_IN_S)
+        self.store.save_org_connection(key, name, cfg.org_tenant)
+        self.store.finish_connect(connect_id, "connected", key)
+        return {"connect_id": connect_id, "status": "connected"}
 
     def status(self, connect_id: str) -> dict:
         row = self.store.connect(connect_id)

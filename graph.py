@@ -79,6 +79,43 @@ class TokenSource:
         return self._token
 
 
+class AppTokenSource:
+    """App-only access tokens (client credentials) for the organization connection; one instance is shared."""
+
+    def __init__(self, http: httpx.Client, cfg, clock=time.time):
+        self.http, self.cfg, self.clock = http, cfg, clock
+        self._token, self._expires = "", 0.0
+        self._lock = threading.Lock()
+
+    def access_token(self, force: bool = False) -> str:
+        with self._lock:
+            if self._token and not force and self.clock() < self._expires - 60:
+                return self._token
+            tok = self._request()
+            self._token, self._expires = tok["access_token"], self.clock() + float(tok.get("expires_in", 3600))
+            return self._token
+
+    def _request(self) -> dict:
+        from urllib.parse import urlparse
+        a = urlparse(self.cfg.authority)
+        url = f"{a.scheme}://{a.netloc}/{self.cfg.org_tenant}/oauth2/v2.0/token"
+        try:
+            r = self.http.post(url, timeout=30, data={
+                "grant_type": "client_credentials", "client_id": self.cfg.org_client_id,
+                "client_secret": self.cfg.org_client_secret, "scope": "https://graph.microsoft.com/.default"})
+        except httpx.HTTPError as e:
+            raise GraphError("network_error", f"{type(e).__name__}: {e}"[:200]) from None
+        try:
+            body = r.json()
+        except ValueError:
+            body = None
+        if r.status_code >= 500 or not isinstance(body, dict):
+            raise GraphError("network_error", f"{r.status_code} from the sign-in service")
+        if r.status_code != 200 or not body.get("access_token"):
+            raise GraphError("reconnect_needed", f"{body.get('error', 'error')}: {body.get('error_description', '')}"[:200])
+        return body
+
+
 class GraphClient:
     def __init__(self, http: httpx.Client, base: str, tokens, sleep=time.sleep):
         self.http, self.base, self.tokens, self.sleep = http, base.rstrip("/"), tokens, sleep

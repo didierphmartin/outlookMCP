@@ -56,11 +56,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"method": {"type": "string", "enum": ["device"]}}},
      "outputSchema": {"type": "object", "properties": {
          "connect_id": {"type": "string", "description": "Pass to connect_status"},
+         "status": {"type": "string", "description": "connected at once for method organization"},
          "verification_uri": {"type": "string", "description": "The sign-in page"},
          "user_code": {"type": "string", "description": "The code to enter there"},
          "expires_in": {"type": "integer", "description": "Seconds the code stays valid"},
          "redirect_url": {"type": "string", "description": "A browser sign-in to use instead of the code (only with a public URL)"}},
-         "required": ["connect_id", "verification_uri", "user_code", "expires_in"]}},
+         "required": ["connect_id"]}},
     {"name": "connect_status",
      "description": ("Status of a connect_start: pending, connected (with connection_key, once), expired, denied, "
                      "failed (with message), policy_blocked, or unknown. When the server has a public URL, policy_blocked, "
@@ -191,7 +192,7 @@ def _wrap(payload) -> dict:
 
 def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, clock=time.time, sleep=time.sleep) -> FastAPI:
     from auth import Auth, AuthError, Connector
-    from graph import GraphClient, TokenSource
+    from graph import AppTokenSource, GraphClient, TokenSource
     from events import EventHubListener, NotificationRouter, Waiter, Wakes
     from mail import MailService
     from store import Store
@@ -230,7 +231,13 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
     store = Store(cfg.db_path, cfg.secret_key, clock=now)
     auth = Auth(http, cfg)
     connector = Connector(auth, store, http, cfg, clock=now)
-    graph_for = lambda key: GraphClient(http, cfg.graph_base, TokenSource(auth, store, key, clock=now), sleep=sleep)
+    app_tokens = AppTokenSource(http, cfg, clock=now)       # one shared instance: the organization's app-only token
+
+    def graph_for(key):
+        conn = store.connection(key)
+        tokens = app_tokens if conn and conn["kind"] == "organization" else TokenSource(auth, store, key, clock=now)
+        return GraphClient(http, cfg.graph_base, tokens, sleep=sleep)
+
     mail = MailService(graph_for, store, cfg)
     # No Store.prune here: forgetting delivered ids could re-deliver old mail that delta sends again.
     keeper = SubscriptionKeeper(store, mail._graph, cfg, clock=now)
@@ -240,6 +247,10 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
     app.state.keeper, app.state.router, app.state.wakes = keeper, router, wakes
     if fake is not None:
         fake.on_notification = router.handle               # fake mode: Graph "delivers" in-process
+
+    tools = [dict(t) for t in TOOLS]
+    if cfg.org_enabled:                                  # the organization method is offered only when configured
+        tools[0]["inputSchema"] = {"type": "object", "properties": {"method": {"type": "string", "enum": ["device", "organization"]}}}
 
     def ok(req_id, result):
         return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": result})
@@ -306,7 +317,7 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
             case "ping":
                 return ok(req_id, {})
             case "tools/list":
-                return ok(req_id, {"tools": TOOLS})
+                return ok(req_id, {"tools": tools})
             case "tools/call" if params.get("name") == "wait_for_new":
                 return ok(req_id, _wrap(await wait_for_new(params.get("arguments") or {},
                                                            request.headers.get(CREDENTIAL_HEADER, ""))))

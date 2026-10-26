@@ -35,6 +35,8 @@ class Store:
         self._db.execute("PRAGMA busy_timeout=5000")
         self._db.executescript(SCHEMA)
         have = {r[1] for r in self._db.execute("PRAGMA table_info(queue)")}
+        if "kind" not in {r[1] for r in self._db.execute("PRAGMA table_info(connections)")}:
+            self._db.execute("ALTER TABLE connections ADD COLUMN kind TEXT DEFAULT 'user'")
         for col in ("attempts", "in_folder", "baseline"):
             if col not in have:
                 self._db.execute(f"ALTER TABLE queue ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -77,15 +79,21 @@ class Store:
 
     # connections -------------------------------------------------------------
     def save_connection(self, connection_key: str, account: str, tenant: str, refresh_token: str) -> None:
-        self._x("INSERT OR REPLACE INTO connections VALUES (?, ?, ?, ?, ?)",
+        self._x("INSERT OR REPLACE INTO connections (key_id, account, tenant, refresh_token, connected_at) VALUES (?, ?, ?, ?, ?)",
                 (self.key_id(connection_key), account, tenant, self._enc(refresh_token), self._clock()))
 
+    def save_org_connection(self, connection_key: str, group: str, tenant: str) -> None:
+        """An organization connection: app-only, so no refresh token. `group` is the group's display name."""
+        self._x("INSERT OR REPLACE INTO connections (key_id, account, tenant, refresh_token, connected_at, kind) "
+                "VALUES (?, ?, ?, NULL, ?, 'organization')", (self.key_id(connection_key), group, tenant, self._clock()))
+
     def connection(self, connection_key: str) -> dict | None:
-        row = self._one("SELECT account, tenant, refresh_token, connected_at FROM connections WHERE key_id = ?",
+        row = self._one("SELECT account, tenant, refresh_token, connected_at, kind FROM connections WHERE key_id = ?",
                         (self.key_id(connection_key),))
         if not row:
             return None
-        return {"account": row[0], "tenant": row[1], "refresh_token": self._dec(row[2]), "connected_at": row[3]}
+        return {"account": row[0], "tenant": row[1], "refresh_token": self._dec(row[2]) if row[2] else "",
+                "connected_at": row[3], "kind": row[4] or "user"}
 
     def update_refresh_token(self, connection_key: str, refresh_token: str) -> None:
         self._x("UPDATE connections SET refresh_token = ? WHERE key_id = ?",
