@@ -50,10 +50,25 @@ class FakeGraph:
         # How GET /me/messages/<id> writes parentFolderId (None: the folder id as is). Real Graph may answer it
         # in another id form than the mailFolders lookup.
         self.parent_folder_id_form = None
+        # An organization (app-only) connection: several mailboxes and one group. The /me mailbox above is the
+        # default (mailbox None); the others answer under users/{id}. An app token is refused on /me.
+        self.group_id = "vip-group"
+        self.mailboxes: dict[str, dict] = {}       # user id -> {mail, displayName, in_group}
+        self.app_tokens: set[str] = set()
+        self.forbidden_mailboxes: set[str] = set()
+        self.group_page_size = 100
+        self._box: str | None = None               # the mailbox the request in flight addresses (None: /me)
+        self._removed_box: dict[str, str | None] = {}   # removed message id -> its mailbox
 
     # test controls -------------------------------------------------------------
+    def add_mailbox(self, user_id: str, mail: str, display_name: str, in_group: bool = True) -> None:
+        self.mailboxes[user_id] = {"mail": mail, "displayName": display_name, "in_group": in_group}
+
+    def forbid_mailbox(self, user_id: str) -> None:
+        self.forbidden_mailboxes.add(user_id)
+
     def add_message(self, folder="inbox", subject="", sender="a@b.c", received="2026-10-07T10:00:00Z",
-                    attachments=(), body_html="<p>hi</p>") -> str:
+                    attachments=(), body_html="<p>hi</p>", mailbox: str | None = None) -> str:
         seq = next(self._seq)
         mid = f"m{seq}"
         atts = []
@@ -68,22 +83,27 @@ class FakeGraph:
                          **({"contentId": cid} if cid else {})})
         self.messages[mid] = {"id": mid, "seq": seq, "folder": self._folder_id(folder), "subject": subject,
                               "from": {"emailAddress": {"address": sender}},
-                              "toRecipients": [{"emailAddress": {"address": self.account}}], "ccRecipients": [],
+                              "mailbox": mailbox,
+                              "toRecipients": [{"emailAddress": {"address": self._mail(mailbox)}}], "ccRecipients": [],
                               "receivedDateTime": received, "hasAttachments": bool(atts),
                               "body": {"contentType": "html", "content": body_html},
                               "webLink": f"https://outlook.office.com/mail/id/{mid}", "attachments": atts}
         self._notify(mid)
         return mid
 
+    def _mail(self, mailbox: str | None) -> str:
+        return self.account if mailbox is None else self.mailboxes[mailbox]["mail"]
+
     def _notify(self, mid: str) -> None:
-        folder = self.messages[mid]["folder"]
+        folder, box = self.messages[mid]["folder"], self.messages[mid]["mailbox"]
+        who = "u1" if box is None else box
         for sid, sub in list(self.subscriptions.items()):
-            if sub["folder"] == folder and self.on_notification:
+            if sub["folder"] == folder and sub["mailbox"] == box and self.on_notification:
                 self.on_notification({"value": [{"subscriptionId": sid, "clientState": sub["clientState"],
                                                  "changeType": "created", "tenantId": self.tenant,
-                                                 "resource": f"Users/u1/Messages/{mid}",
+                                                 "resource": f"Users/{who}/Messages/{mid}",
                                                  "resourceData": {"@odata.type": "#Microsoft.Graph.Message",
-                                                                  "@odata.id": f"Users/u1/Messages/{mid}",
+                                                                  "@odata.id": f"Users/{who}/Messages/{mid}",
                                                                   "id": mid}}]})
 
     def notify_created(self, mid: str) -> None:
@@ -101,6 +121,7 @@ class FakeGraph:
     def remove_message(self, mid: str) -> None:
         m = self.messages.pop(mid)
         self.removed.append((next(self._seq), m["folder"], mid))
+        self._removed_box[mid] = m["mailbox"]
 
     def touch_message(self, mid: str) -> None:
         """Change a message (read, flagged, ...): like real Graph, the next delta round sends it again."""
@@ -147,9 +168,13 @@ class FakeGraph:
         if self.throttle_next:
             self.throttle_next -= 1
             return httpx.Response(429, headers={"Retry-After": "2"}, json={"error": {"code": "TooManyRequests"}})
-        if request.headers.get("Authorization", "").removeprefix("Bearer ") not in self.access_tokens:
-            return httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken"}})
+        bearer = request.headers.get("Authorization", "").removeprefix("Bearer ")
         path = url.path.split("/v1.0", 1)[-1]
+        first = path.strip("/").split("/")[0]
+        if bearer not in self.access_tokens and not (bearer in self.app_tokens and first in ("users", "groups", "subscriptions")):
+            return httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken"}})
+        if (denied := self._select_mailbox(path)):
+            return denied
         match request.method:
             case "POST":
                 return self._post(path, json.loads(request.content or b"{}"))
@@ -158,6 +183,38 @@ class FakeGraph:
         return self._graph(path, parse_qs(url.query))
 
     MAIL_MAX = 10070 * 60
+
+    def _select_mailbox(self, path: str) -> httpx.Response | None:
+        """users/{uid}/... addresses a mailbox like me/...: remember which one for the routes below."""
+        parts = path.strip("/").split("/")
+        self._box = None
+        if parts[0] != "users" or len(parts) < 2:
+            return None
+        if parts[1] in self.forbidden_mailboxes:
+            return httpx.Response(403, json={"error": {"code": "ErrorAccessDenied", "message": "Access is denied."}})
+        if parts[1] not in self.mailboxes:
+            return httpx.Response(404, json={"error": {"code": "ResourceNotFound"}})
+        self._box = parts[1]
+        return None
+
+    def _mine(self, parts: list[str]) -> list[str]:
+        """The route table's form of a path: users/{uid}/x becomes me/x."""
+        return ["me", *parts[2:]] if parts[0] == "users" and len(parts) > 1 else parts
+
+    def _get(self, mid: str) -> dict | None:
+        """A message of the addressed mailbox (another mailbox's message is not found)."""
+        m = self.messages.get(mid)
+        return m if m is not None and m["mailbox"] == self._box else None
+
+    def _members(self, q: dict) -> httpx.Response:
+        members = [{"id": uid, "mail": b["mail"], "displayName": b["displayName"]}
+                   for uid, b in self.mailboxes.items() if b["in_group"]]
+        skip = int(q.get("$skiptoken", ["0"])[0])
+        body = {"value": members[skip:skip + self.group_page_size]}
+        if skip + self.group_page_size < len(members):
+            body["@odata.nextLink"] = (f"https://graph.microsoft.com/v1.0/groups/{self.group_id}"
+                                       f"/transitiveMembers/microsoft.graph.user?$skiptoken={skip + self.group_page_size}")
+        return httpx.Response(200, json=body)
 
     def _subscription_change(self, method: str, path: str, body: dict) -> httpx.Response:
         match path.strip("/").split("/"):
@@ -176,16 +233,19 @@ class FakeGraph:
             return httpx.Response(self.subscription_status, json={"error": {"code": "ExtensionError", "message": "refused"}})
         import re
         from datetime import datetime
-        m = re.fullmatch(r"me/mailFolders\('([^']+)'\)/messages", body.get("resource", ""))
+        m = re.fullmatch(r"(?:me|users/([^/]+))/mailFolders\('([^']+)'\)/messages", body.get("resource", ""))
         if not m or body.get("changeType") != "created":
             return httpx.Response(400, json={"error": {"code": "InvalidRequest", "message": "unsupported resource"}})
+        box = m.group(1)
+        if box is not None and box not in self.mailboxes:
+            return httpx.Response(404, json={"error": {"code": "ResourceNotFound"}})
         exp = datetime.fromisoformat(body["expirationDateTime"].replace("Z", "+00:00")).timestamp()
         if exp - self.clock() > self.MAIL_MAX:
             return httpx.Response(400, json={"error": {"code": "ExtensionError",
                                                        "message": "Subscription expiration can only be 10070 minutes in the future."}})
         sid = f"sub-{next(self._seq)}"
         self.subscriptions[sid] = {"resource": body["resource"], "clientState": body.get("clientState", ""),
-                                   "expirationDateTime": body["expirationDateTime"], "folder": self._folder_id(m.group(1))}
+                                   "expirationDateTime": body["expirationDateTime"], "folder": self._folder_id(m.group(2)), "mailbox": box}
         return httpx.Response(201, json={"id": sid, **self.subscriptions[sid]})
 
     def _token(self, form: dict) -> httpx.Response:
@@ -204,6 +264,12 @@ class FakeGraph:
                 if form.get("refresh_token", [""])[0] not in self.refresh_tokens:
                     return self._oauth_error("invalid_grant", "AADSTS70008: The refresh token has expired.")
                 return self._tokens_response()
+            case "client_credentials":
+                if form.get("scope", [""])[0] != "https://graph.microsoft.com/.default":
+                    return self._oauth_error("invalid_scope")
+                at = f"APP{next(self._tokens)}"
+                self.app_tokens.add(at)
+                return httpx.Response(200, json={"access_token": at, "token_type": "Bearer", "expires_in": 3600})
             case "authorization_code":
                 return self._tokens_response()
             case _:
@@ -244,7 +310,13 @@ class FakeGraph:
         if (bad := self._bad_select(q)):
             return bad
         parts = path.strip("/").split("/")
+        if parts == ["groups", self.group_id, "transitiveMembers", "microsoft.graph.user"]:
+            return self._members(q)
+        parts = self._mine(parts)
         match parts:
+            case ["me"] if self._box:
+                b = self.mailboxes[self._box]
+                return httpx.Response(200, json={"id": self._box, "mail": b["mail"], "userPrincipalName": b["mail"]})
             case ["me"]:
                 return httpx.Response(200, json={"mail": self.account, "userPrincipalName": self.account})
             case ["me", "mailFolders"]:
@@ -261,17 +333,17 @@ class FakeGraph:
             case ["me", "mailFolders", fid, "messages", "delta"]:
                 return self._delta(self._folder_id(fid), q)
             case ["me", "mailFolders", fid, "messages", mid]:
-                m = self.messages.get(mid)
+                m = self._get(mid)
                 if m is None or m["folder"] != self._folder_id(fid):
                     return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
                 return httpx.Response(200, json={"id": mid})
             case ["me", "messages", mid, "attachments", aid, "$value"]:
-                att = next((a for a in self.messages.get(mid, {}).get("attachments", []) if a["id"] == aid), {})
+                att = next((a for a in (self._get(mid) or {}).get("attachments", []) if a["id"] == aid), {})
                 if att.get("@odata.type") == "#microsoft.graph.referenceAttachment":    # a link: nothing to download
                     return httpx.Response(400, json={"error": {"code": "ErrorInvalidRequest"}})
                 return httpx.Response(200, content=self.attachments[aid])
             case ["me", "messages", mid, "attachments", aid]:
-                m = self.messages.get(mid)
+                m = self._get(mid)
                 att = next((a for a in (m or {}).get("attachments", []) if a["id"] == aid), None)
                 if not att:
                     return httpx.Response(404, json={})
@@ -279,7 +351,7 @@ class FakeGraph:
                     if att["@odata.type"].endswith("fileAttachment") else att
                 return httpx.Response(200, json=full)
             case ["me", "messages", mid]:
-                m = self.messages.get(mid)
+                m = self._get(mid)
                 if m is None:
                     return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
                 form = self.parent_folder_id_form or (lambda fid: fid)
@@ -294,17 +366,18 @@ class FakeGraph:
             return self._subscribe(body)
         if self.forbid_writes:
             return httpx.Response(403, json={"error": {"code": "ErrorAccessDenied", "message": "Access is denied."}})
-        match path.strip("/").split("/"):
+        match self._mine(path.strip("/").split("/")):
             case ["me", "messages", mid, "move"]:
-                m, dest = self.messages.get(mid), self.folder(self._folder_id(body.get("destinationId", "")))
+                m, dest = self._get(mid), self.folder(self._folder_id(body.get("destinationId", "")))
                 if m is None or dest is None:
                     return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
                 self.removed.append((next(self._seq), m["folder"], mid))   # the source folder's delta: gone
+                self._removed_box[mid] = m["mailbox"]
                 m["folder"], m["seq"] = dest["id"], next(self._seq)        # immutable id: same id after the move
                 self._notify(mid)                                          # "created" in the destination folder
                 return httpx.Response(201, json=m)
             case ["me", "messages", mid, "forward"]:
-                if mid not in self.messages:
+                if self._get(mid) is None:
                     return httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
                 return httpx.Response(202)
             case ["me", "mailFolders"] | ["me", "mailFolders", _, "childFolders"] as parts:
@@ -326,13 +399,15 @@ class FakeGraph:
         since = q.get("$filter", ["receivedDateTime ge "])[0].removeprefix("receivedDateTime ge ")
         skip = int(q.get("$skiptoken", ["0"])[0])
         changes = [m for m in sorted(self.messages.values(), key=lambda m: m["seq"], reverse=True)
-                   if m["folder"] == fid and m["seq"] > after and m["receivedDateTime"] >= since]
+                   if m["folder"] == fid and m["mailbox"] == self._box and m["seq"] > after and m["receivedDateTime"] >= since]
         changes = [{k: v for k, v in m.items() if k in ("id", "from", "subject", "receivedDateTime", "hasAttachments")}
                    for m in changes]
         if "$deltatoken" in q:                            # like real Graph, a first (token-less) round lists no removals
-            changes += [{"id": mid, "@removed": {"reason": "deleted"}} for seq, f, mid in self.removed if f == fid and seq > after]
+            changes += [{"id": mid, "@removed": {"reason": "deleted"}} for seq, f, mid in self.removed
+                        if f == fid and seq > after and self._removed_box.get(mid) == self._box]
         page, rest = changes[skip:skip + 2], changes[skip + 2:]
-        base = f"https://graph.microsoft.com/v1.0/me/mailFolders/{fid}/messages/delta"
+        who = "me" if self._box is None else f"users/{self._box}"
+        base = f"https://graph.microsoft.com/v1.0/{who}/mailFolders/{fid}/messages/delta"
         keep_filter = "&$filter=" + quote(f"receivedDateTime ge {since}") if since else ""
         body = {"value": page}
         if rest:
