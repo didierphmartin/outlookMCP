@@ -241,6 +241,8 @@ class FakeGraph:
         box = m.group(1)
         if box is not None and box not in self.mailboxes:
             return httpx.Response(404, json={"error": {"code": "ResourceNotFound"}})
+        if box in self.forbidden_mailboxes:
+            return httpx.Response(403, json={"error": {"code": "ErrorAccessDenied", "message": "Access is denied."}})
         exp = datetime.fromisoformat(body["expirationDateTime"].replace("Z", "+00:00")).timestamp()
         if exp - self.clock() > self.MAIL_MAX:
             return httpx.Response(400, json={"error": {"code": "ExtensionError",

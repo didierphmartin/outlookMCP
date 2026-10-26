@@ -288,6 +288,31 @@ class MailService:
         scope, folder_id, filters = self._scope(self._graph(key), args)
         return scope, folder_id, filters.mode
 
+    def watch_scopes(self, key: str, args: dict) -> list[tuple[str, str, str, str | None]]:
+        """[(queue scope, folder id, mode, mailbox id)]: one for a user connection (mailbox id None), one per member
+        mailbox for an organization connection. A mailbox that fails is logged and skipped, as poll_new_mail does."""
+        if not self._is_org(key):
+            return [(*self.watch_scope(key, args), None)]
+        graph, filters = self._graph(key), Filters.from_args(args)
+        watched, failed = [], []
+        for box in self.directory(key).members():
+            try:
+                scope, folder_id = self._org_scope(graph, key, box, args, filters)
+            except (GraphError, httpx.HTTPError, ValueError) as e:
+                self._skip(box, e, failed)
+                continue
+            watched.append((scope, folder_id, filters.mode, box.id))
+        if failed and not watched:
+            raise failed[0]
+        return watched
+
+    def _skip(self, box: Mailbox, e: Exception, failed: list[Exception]) -> None:
+        """One mailbox's failure: logged and collected; the connection's own (reconnect_needed) is raised."""
+        if isinstance(e, GraphError) and e.code == "reconnect_needed":
+            raise e
+        failed.append(e)
+        log.warning("mailbox %s (%s) skipped: %s", box.mail, box.id, self._failure(e))
+
     def lease_s(self, mode: str) -> float | None:
         """The claim lease of a mode: drop re-delivers an email still in the folder; new is at-most-once."""
         return self.cfg.drop_lease_s if mode == "drop" else None
@@ -327,10 +352,7 @@ class MailService:
                 scope, folder_id = self._org_scope(graph, key, box, args, filters)
                 self._refresh_queue(graph, key, scope, folder_id, filters, self._root(key, box.id), first)
             except (GraphError, httpx.HTTPError, ValueError) as e:
-                if isinstance(e, GraphError) and e.code == "reconnect_needed":
-                    raise
-                failed.append(e)
-                log.warning("mailbox %s (%s) skipped: %s", box.mail, box.id, self._failure(e))
+                self._skip(box, e, failed)
                 continue
             watched[scope] = (box, folder_id)
         if failed and not watched:

@@ -17,13 +17,15 @@ IDLE_S = 24 * 3600             # drop a subscription nobody has waited on for a 
 TICK_S = 15 * 60
 
 
-def mail_resource(folder_id: str) -> str:
-    return f"me/mailFolders('{folder_id}')/messages"
+def mail_resource(folder_id: str, mailbox_id: str | None = None) -> str:
+    """The signed-in user's folder (me/...), or a mailbox of an organization connection (users/{id}/...)."""
+    root = "me" if mailbox_id is None else f"users/{mailbox_id}"
+    return f"{root}/mailFolders('{folder_id}')/messages"
 
 
 def folder_of(resource: str) -> str | None:
-    """The folder id of a mail_resource, None for any other resource."""
-    m = re.fullmatch(r"me/mailFolders\('(.+)'\)/messages", resource or "")
+    """The folder id of a mail_resource (either form), None for any other resource."""
+    m = re.fullmatch(r"(?:me|users/[^/]+)/mailFolders\('(.+)'\)/messages", resource or "")
     return m.group(1) if m else None
 
 
@@ -98,6 +100,14 @@ class SubscriptionKeeper:
             except GraphError:
                 pass                                       # gone already, or the sign-in is dead: it expires anyway
         self.store.delete_subscription(sub["connection_key"], sub["resource"])
+
+    def drop_mailboxes(self, connection_key: str, mailbox_ids: list[str]) -> None:
+        """The subscriptions of mailboxes that left an organization connection's group."""
+        kid = self.store.key_id(connection_key)
+        prefixes = tuple(f"users/{m}/" for m in mailbox_ids)
+        for sub in self.store.subscriptions():
+            if sub["key_id"] == kid and sub["resource"].startswith(prefixes):
+                self.drop(sub)
 
     def tick(self) -> None:
         """Every TICK_S: drop idle watches, renew the ones close to expiry, retry the ones that failed."""

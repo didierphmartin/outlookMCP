@@ -184,7 +184,7 @@ def test_filter_sets_on_one_folder_share_a_subscription(fake, svc, parts, ecfg):
     waiter = Waiter(svc, keeper, wakes, svc.store, ecfg, clock)
     a = waiter.prepare("key-1", {"args": {"folder": "Inbox"}})
     b = waiter.prepare("key-1", {"args": {"folder": "Inbox", "subject_contains": "invoice"}})
-    assert a["key"] == b["key"] and a["scope"] != b["scope"]
+    assert a["keys"] == b["keys"] and a["scopes"] != b["scopes"]
     assert len(subscribe_posts(fake)) == 1
 
 
@@ -254,8 +254,8 @@ def test_wait_flat_args_watch_drop_scope(fake, svc, parts, ecfg):
     flat = {"folder": "To SharePoint", "mode": "drop"}
     prep = waiter.prepare("key-1", flat)                     # the drop folder is created, not unknown_folder
     assert "error" not in prep and prep["queued"] is False
-    assert prep["scope"] == waiter.prepare("key-1", {"args": flat})["scope"]
-    assert prep["scope"] == waiter.prepare("key-1", {"folder": "Inbox", "args": flat})["scope"]   # nested wins
+    assert prep["scopes"] == waiter.prepare("key-1", {"args": flat})["scopes"]
+    assert prep["scopes"] == waiter.prepare("key-1", {"folder": "Inbox", "args": flat})["scopes"]   # nested wins
     svc.poll_new_mail("key-1", flat)                         # baseline
     fake.add_message(folder="To SharePoint", subject="x", received="2026-10-01T08:00:00Z")
     svc._refresh_queue_for_tests("key-1", "To SharePoint", {"mode": "drop"})

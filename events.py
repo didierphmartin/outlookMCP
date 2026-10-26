@@ -39,12 +39,21 @@ class Wakes:
 
     async def wait(self, key: tuple[str, str], timeout: float) -> bool:
         """True when woken (now or earlier), False after timeout seconds."""
+        return await self.wait_any([key], timeout)
+
+    def take_any(self, keys: list[tuple[str, str]]) -> bool:
+        """Takes every pending wake of these keys; True if there was one."""
+        return any([self._take(k) for k in keys])
+
+    async def wait_any(self, keys: list[tuple[str, str]], timeout: float) -> bool:
+        """True when any of these keys is woken (now or earlier), False after timeout seconds."""
         me = (asyncio.get_running_loop(), asyncio.Event())
         with self._lock:
-            if key in self._pending:
-                self._pending.discard(key)
+            if self._pending.intersection(keys):
+                self._pending.difference_update(keys)
                 return True
-            self._waiters.setdefault(key, set()).add(me)
+            for key in keys:
+                self._waiters.setdefault(key, set()).add(me)
         try:
             await asyncio.wait_for(me[1].wait(), max(timeout, 0))
             woke = True
@@ -52,10 +61,11 @@ class Wakes:
             woke = False
         finally:
             with self._lock:
-                self._waiters[key].discard(me)
-                if not self._waiters[key]:
-                    del self._waiters[key]
-        return self._take(key) or woke
+                for key in keys:
+                    self._waiters[key].discard(me)
+                    if not self._waiters[key]:
+                        del self._waiters[key]
+        return self.take_any(keys) or woke
 
 
 class NotificationRouter:
@@ -166,15 +176,19 @@ DEFAULT_WAIT_S = 120
 
 class Waiter:
     """wait_for_new: answers ready when a notification arrived for the poll's folder, when undelivered mail
-    is already queued (in drop mode: or a delivered one's lease has run out), or when the safety poll is due; timeout otherwise. Never returns mail itself."""
+    is already queued (in drop mode: or a delivered one's lease has run out), or when the safety poll is due; timeout
+    otherwise. Never returns mail itself. An organization connection watches the folder in every member mailbox,
+    each with its own subscription, and is ready on any of them."""
 
     def __init__(self, mail, keeper, wakes: Wakes, store, cfg, clock):
         self.mail, self.keeper, self.wakes, self.store, self.cfg, self.clock = mail, keeper, wakes, store, cfg, clock
         self._last_ready: dict[tuple[str, str], float] = {}   # (key_id, scope) -> when it was last ready
+        self._departures: set[str] = set()                     # organization connections whose drops are hooked up
+        self._lock = threading.Lock()
         self.listener_error = lambda: ""
 
     def prepare(self, connection_key: str, args: dict) -> dict:
-        """The blocking part (Graph calls), run on a worker thread: the folder, its subscription, the queue."""
+        """The blocking part (Graph calls), run on a worker thread: the folders, their subscriptions, the queue."""
         poll = args.get("poll") or "poll_new_mail"
         if poll != "poll_new_mail":
             return {"error": "invalid_argument", "message": f"poll must be poll_new_mail, not {poll!r}"}
@@ -184,36 +198,56 @@ class Waiter:
         # The poll's arguments may also come flat, at the top level; the nested ones win.
         poll_args = {**{k: args[k] for k in POLL_ARGS if k in args}, **nested}
         try:
-            scope, folder_id, mode = self.mail.watch_scope(connection_key, poll_args)
+            org = self.mail._is_org(connection_key)
+            if org:
+                self._hook_departures(connection_key)
+            watches = self.mail.watch_scopes(connection_key, poll_args)
         except Exception as e:  # noqa: BLE001 -- the tool never raises
             return self.mail._failure(e)
-        resource = mail_resource(folder_id)
-        events = self.keeper.ensure(connection_key, resource)
+        kid = self.store.key_id(connection_key)
+        keys, off = [], []
+        for _scope, folder_id, _mode, mailbox_id in watches:
+            resource = mail_resource(folder_id, mailbox_id)
+            keys.append((kid, resource))
+            if (events := self.keeper.ensure(connection_key, resource))["events"] != "on":
+                off.append(f"{mailbox_id}: {events['reason']}" if org else events["reason"])
+        events = {"events": "off", "reason": "; ".join(off)[:300]} if off else {"events": "on"}
         if events["events"] == "on" and self.listener_error():
             events = {"events": "off", "reason": "event hub: " + self.listener_error()}
-        kid = self.store.key_id(connection_key)
-        return {"key": (kid, resource), "scope": (kid, scope), "events": events,
-                "queued": self.store.has_undelivered(connection_key, scope, self.mail.lease_s(mode))}
+        return {"keys": keys, "scopes": [(kid, scope) for scope, *_ in watches] or [(kid, "")],  # empty group: one timer
+                "events": events, "fallback_s": self.cfg.org_fallback_s if org else self.cfg.watch_fallback_s,
+                "queued": any(self.store.has_undelivered(connection_key, scope, self.mail.lease_s(mode))
+                              for scope, _f, mode, _m in watches)}
+
+    def _hook_departures(self, connection_key: str) -> None:
+        """Mailboxes that leave the group lose their subscriptions, at the directory's re-read."""
+        with self._lock:
+            if connection_key in self._departures:
+                return
+            self._departures.add(connection_key)
+        self.mail.directory(connection_key).on_departed(
+            lambda gone: self.keeper.drop_mailboxes(connection_key, [box.id for box in gone]))
 
     async def wait(self, prep: dict, timeout_s) -> dict:
         try:
             timeout = min(max(float(timeout_s if timeout_s is not None else DEFAULT_WAIT_S), 0), MAX_WAIT_S)
         except (TypeError, ValueError):
             return {"error": "invalid_argument", "message": "timeout_s must be a number of seconds"}
-        now = self.clock()
+        now, fallback, keys = self.clock(), prep["fallback_s"], prep["keys"]
         # A scope first seen since the server started is ready at once: mail may have come while it was down.
-        last = self._last_ready.get(prep["scope"], now - self.cfg.watch_fallback_s)
-        due = last + self.cfg.watch_fallback_s
-        if prep["queued"] or self.wakes._take(prep["key"]):
+        due = min(self._last_ready.get(s, now - fallback) for s in prep["scopes"]) + fallback
+        if prep["queued"] or self.wakes.take_any(keys):
             return self._ready(prep, "pending")
         if due <= now:
             return self._ready(prep, "fallback")
-        if await self.wakes.wait(prep["key"], min(timeout, due - now)):
+        if await (self.wakes.wait(keys[0], min(timeout, due - now)) if len(keys) == 1
+                  else self.wakes.wait_any(keys, min(timeout, due - now))):
             return self._ready(prep, "event")
         if self.clock() >= due:
             return self._ready(prep, "fallback")
         return {"status": "timeout", **prep["events"]}
 
     def _ready(self, prep: dict, via: str) -> dict:
-        self._last_ready[prep["scope"]] = self.clock()
+        for scope in prep["scopes"]:
+            self._last_ready[scope] = self.clock()
         return {"status": "ready", "via": via, **prep["events"]}
