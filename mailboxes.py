@@ -1,11 +1,13 @@
 """The mailboxes of an organization connection: the members of one Entra group, re-read every refresh_s."""
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
 from dataclasses import dataclass
 
+log = logging.getLogger("outlook_mcp.mailboxes")
 UNSAFE = re.compile(r'[/\\:*?"<>|]')          # characters SharePoint rejects in a folder name
 
 
@@ -44,7 +46,11 @@ class MailboxDirectory:
             members = list(self._members)
         if gone:
             for listener in self._listeners:
-                listener(gone)
+                try:
+                    listener(gone)
+                except Exception as e:                  # one listener's failure never stops the others, nor the caller
+                    log.warning("departure listener %s failed for %s: %s: %s", getattr(listener, "__qualname__", listener),
+                                [m.mail for m in gone], type(e).__name__, e)
         return members
 
     def _read(self) -> list[Mailbox]:

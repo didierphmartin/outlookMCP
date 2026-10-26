@@ -313,6 +313,11 @@ class MailService:
         failed.append(e)
         log.warning("mailbox %s (%s) skipped: %s", box.mail, box.id, self._failure(e))
 
+    @staticmethod
+    def _transient(e: Exception) -> bool:
+        """Worth another try: throttling, a 5xx, the network, or a non-JSON answer."""
+        return isinstance(e, (httpx.HTTPError, ValueError)) or (isinstance(e, GraphError) and e.transient)
+
     def lease_s(self, mode: str) -> float | None:
         """The claim lease of a mode: drop re-delivers an email still in the folder; new is at-most-once."""
         return self.cfg.drop_lease_s if mode == "drop" else None
@@ -357,7 +362,8 @@ class MailService:
             watched[scope] = (box, folder_id)
         if failed and not watched:
             raise failed[0]
-        if first and watched and not failed:        # an empty group has reached nobody yet
+        # A final answer (forbidden, not_found, ...) reaches its mailbox; only a transient failure leaves it unreached.
+        if first and watched and not any(self._transient(e) for e in failed):    # an empty group has reached nobody yet
             self.store.mark_first_round(key)
         while (got := self.store.claim_next_of(key, list(watched), self.lease_s(filters.mode))) is not None:
             scope, mid = got

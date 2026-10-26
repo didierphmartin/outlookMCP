@@ -135,15 +135,43 @@ def test_one_broken_mailbox_never_stops_the_others(fake, org):
     assert call(c, "poll_new_mail", new, key=key) == {"mail": None}
 
 
+def throttle(fake, uid):
+    """Every request on mailbox uid answers 429 (a transient failure) until the returned undo is called."""
+    select = fake._select_mailbox
+
+    def throttled(path):
+        if path.startswith(f"/users/{uid}/"):
+            return httpx.Response(429, headers={"Retry-After": "0"}, json={"error": {"code": "TooManyRequests"}})
+        return select(path)
+    fake._select_mailbox = throttled
+    return lambda: setattr(fake, "_select_mailbox", select)
+
+
 def test_baseline_until_a_first_round_reaches_every_mailbox(fake, org):
     c, key = org
     fake.folders.append({"id": "drop-id", "displayName": "To SharePoint"})
     fake.add_message(folder="drop-id", subject="alice's old", mailbox="u-alice")
     fake.add_message(folder="drop-id", subject="bob's old", mailbox="u-bob")
-    fake.forbid_mailbox("u-bob")
+    undo = throttle(fake, "u-bob")
     assert call(c, "poll_new_mail", DROP, key=key) == {"mail": None}       # Alice baselined, Bob skipped
-    fake.forbidden_mailboxes.discard("u-bob")
+    undo()
     assert call(c, "poll_new_mail", DROP, key=key) == {"mail": None}       # no complete round yet: Bob baselined
+    fake.add_mailbox("u-carol", "carol@contoso.com", "Carol")
+    carol = fake.add_message(folder="drop-id", subject="carol's old", mailbox="u-carol")
+    later(c)
+    assert call(c, "poll_new_mail", DROP, key=key)["mail"]["id"] == f"u-carol~{carol}"
+    assert call(c, "poll_new_mail", DROP, key=key) == {"mail": None}
+
+
+def test_permanently_forbidden_member_still_completes_the_first_round(fake, org, org_cfg):  # noqa: F811
+    """Bob answers 403 for good: he is reached (his answer is final), so the round that reached Alice is the
+    first round, and a VIP added afterwards gets the drops already in their folder."""
+    c, key = org
+    fake.folders.append({"id": "drop-id", "displayName": "To SharePoint"})
+    fake.add_message(folder="drop-id", subject="alice's old", mailbox="u-alice")
+    fake.forbid_mailbox("u-bob")
+    assert call(c, "poll_new_mail", DROP, key=key) == {"mail": None}       # Alice baselined, Bob refused
+    assert sqlite3.connect(org_cfg.db_path).execute("SELECT first_round_at FROM connections").fetchone()[0] is not None
     fake.add_mailbox("u-carol", "carol@contoso.com", "Carol")
     carol = fake.add_message(folder="drop-id", subject="carol's old", mailbox="u-carol")
     later(c)
@@ -205,6 +233,25 @@ def test_directory_rereads_after_refresh_and_reports_departed():
     assert gone == [Mailbox("2", "b@c.com", "B")]
     assert graph.paths[0] == ("/groups/g/members/microsoft.graph.user",
                               {"$select": "id,mail,displayName"})
+
+
+def test_a_failing_departure_listener_never_stops_the_others(caplog):
+    t = [0.0]
+    graph = StubGraph([{"id": "1", "mail": "a@c.com", "displayName": "A"}, {"id": "2", "mail": "b@c.com", "displayName": "B"}])
+    d = MailboxDirectory(graph, "g", clock=lambda: t[0], refresh_s=900)
+
+    def broken(_gone):
+        raise RuntimeError("listener exploded")
+    gone = []
+    d.on_departed(broken)
+    d.on_departed(gone.extend)
+    d.members()
+    graph.members = graph.members[:1]
+    t[0] = 901
+    with caplog.at_level("WARNING", logger="outlook_mcp"):
+        assert [m.id for m in d.members()] == ["1"]
+    assert gone == [Mailbox("2", "b@c.com", "B")]
+    assert "listener exploded" in caplog.text
 
 
 def test_first_watch_is_baseline_later_mailbox_is_not(fake, org):
