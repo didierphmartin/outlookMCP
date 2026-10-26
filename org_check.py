@@ -7,6 +7,7 @@ Exit 0 only when the VIP is readable and the non-VIP is refused.
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -32,7 +33,7 @@ def load_env(path: Path) -> None:
 def _folders(graph: GraphClient, address: str) -> str:
     """'ok' when the mailbox's folders can be read, else the error code (a short fixed word)."""
     try:
-        graph.get(f"/users/{address}/mailFolders", {"$top": "1"})
+        graph.get(f"/users/{quote(address, safe='@')}/mailFolders", {"$top": "1"})
         return "ok"
     except GraphError as e:
         return e.code
@@ -59,7 +60,7 @@ def main(argv: list[str], http: httpx.Client | None = None, cfg: AppConfig | Non
         return 1
     print("token: ok")
     try:
-        n, url, params = 0, f"/groups/{cfg.org_group}/transitiveMembers/microsoft.graph.user", {"$select": "id"}
+        n, url, params = 0, f"/groups/{cfg.org_group}/members/microsoft.graph.user", {"$select": "id"}
         while url:
             page = graph.get(url, params)
             n += len(page.get("value", []))

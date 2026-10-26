@@ -203,7 +203,7 @@ def test_directory_rereads_after_refresh_and_reports_departed():
     t[0] = 901
     assert [m.id for m in d.members()] == ["1"]
     assert gone == [Mailbox("2", "b@c.com", "B")]
-    assert graph.paths[0] == ("/groups/g/transitiveMembers/microsoft.graph.user",
+    assert graph.paths[0] == ("/groups/g/members/microsoft.graph.user",
                               {"$select": "id,mail,displayName"})
 
 

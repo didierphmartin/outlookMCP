@@ -215,7 +215,7 @@ class FakeGraph:
         body = {"value": members[skip:skip + self.group_page_size]}
         if skip + self.group_page_size < len(members):
             body["@odata.nextLink"] = (f"https://graph.microsoft.com/v1.0/groups/{self.group_id}"
-                                       f"/transitiveMembers/microsoft.graph.user?$skiptoken={skip + self.group_page_size}")
+                                       f"/members/microsoft.graph.user?$skiptoken={skip + self.group_page_size}")
         return httpx.Response(200, json=body)
 
     def _subscription_change(self, method: str, path: str, body: dict) -> httpx.Response:
@@ -318,7 +318,7 @@ class FakeGraph:
         parts = path.strip("/").split("/")
         if parts == ["groups", self.group_id]:
             return httpx.Response(200, json={"id": self.group_id, "displayName": self.group_name})
-        if parts == ["groups", self.group_id, "transitiveMembers", "microsoft.graph.user"]:
+        if parts == ["groups", self.group_id, "members", "microsoft.graph.user"]:
             return self._members(q)
         parts = self._mine(parts)
         match parts:

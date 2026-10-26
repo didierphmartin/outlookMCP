@@ -33,7 +33,7 @@ def test_group_members_listed(fake, http):
     fake.add_mailbox("u-alice", "alice@contoso.com", "Alice")
     fake.add_mailbox("u-bob", "bob@contoso.com", "Bob")
     fake.add_mailbox("u-eve", "eve@contoso.com", "Eve", in_group=False)
-    r = http.get(f"{GRAPH}/groups/{fake.group_id}/transitiveMembers/microsoft.graph.user", headers=app_token(http))
+    r = http.get(f"{GRAPH}/groups/{fake.group_id}/members/microsoft.graph.user", headers=app_token(http))
     assert r.status_code == 200
     assert r.json()["value"] == [{"id": "u-alice", "mail": "alice@contoso.com", "displayName": "Alice"},
                                  {"id": "u-bob", "mail": "bob@contoso.com", "displayName": "Bob"}]

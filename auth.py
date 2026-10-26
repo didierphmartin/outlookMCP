@@ -126,7 +126,7 @@ class Connector:
                     "OUTLOOK_ORG_CLIENT_SECRET and OUTLOOK_ORG_GROUP on the Outlook server to enable the organization connection"}
         graph = GraphClient(self.http, cfg.graph_base, AppTokenSource(self.http, cfg, clock=self.clock))
         try:
-            graph.get(f"/groups/{cfg.org_group}/transitiveMembers/microsoft.graph.user", {"$top": "1", "$select": "id"})
+            graph.get(f"/groups/{cfg.org_group}/members/microsoft.graph.user", {"$top": "1", "$select": "id"})
             name = graph.get(f"/groups/{cfg.org_group}", {"$select": "displayName"}).get("displayName") or cfg.org_group
         except GraphError as e:
             return {"error": e.code, "message": e.message or str(e)}

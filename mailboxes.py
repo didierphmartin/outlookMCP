@@ -48,7 +48,7 @@ class MailboxDirectory:
         return members
 
     def _read(self) -> list[Mailbox]:
-        users, url = [], f"/groups/{self.group}/transitiveMembers/microsoft.graph.user"
+        users, url = [], f"/groups/{self.group}/members/microsoft.graph.user"
         params = {"$select": "id,mail,displayName"}
         while url:
             page = self.graph.get(url, params)

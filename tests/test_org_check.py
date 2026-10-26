@@ -1,4 +1,5 @@
 import dataclasses
+import os
 
 import pytest
 
@@ -46,10 +47,9 @@ def test_bad_secret_stops_at_token_and_prints_no_secret(org, http, org_cfg, caps
 
 def test_env_file_loaded_without_overriding(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text('# c\nOUTLOOK_ORG_TENANT="t1"\nOUTLOOK_ORG_GROUP=g;x=y\nOUTLOOK_ORG_CLIENT_ID=from-file\n')
-    monkeypatch.delenv("OUTLOOK_ORG_TENANT", raising=False)
-    monkeypatch.delenv("OUTLOOK_ORG_GROUP", raising=False)
     monkeypatch.setenv("OUTLOOK_ORG_CLIENT_ID", "already")
+    for k in ("OUTLOOK_ORG_TENANT", "OUTLOOK_ORG_GROUP"):
+        monkeypatch.setenv(k, "x")      # registers restore; the next line clears it for the load
+        monkeypatch.delenv(k)
     org_check.load_env(tmp_path / ".env")
-    import os
     assert (os.environ["OUTLOOK_ORG_TENANT"], os.environ["OUTLOOK_ORG_GROUP"], os.environ["OUTLOOK_ORG_CLIENT_ID"]) == ("t1", "g;x=y", "already")
-    monkeypatch.delenv("OUTLOOK_ORG_TENANT"); monkeypatch.delenv("OUTLOOK_ORG_GROUP")

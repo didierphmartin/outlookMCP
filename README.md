@@ -236,7 +236,8 @@ the Exchange Administrator role). About 20 minutes.
    granted in Entra and in Exchange are a union, so an unscoped `Mail.Read`/`Mail.ReadWrite` in Entra
    cancels the scope and opens every mailbox.
 3. **The VIP group:** a mail-enabled security group "SynergyAI VIP" with the VIPs as members. Only
-   direct members are in scope (Microsoft: nested group members are out of scope). Microsoft 365 groups,
+   direct members are in scope (Microsoft: nested group members are out of scope). Only direct members count:
+   nested groups are not followed (Exchange's scope ignores them too); keep the VIP group flat. Microsoft 365 groups,
    mail-enabled security groups and distribution lists are supported as scope groups.
 4. **Exchange Online PowerShell** (after `Connect-ExchangeOnline`):
 
@@ -291,7 +292,8 @@ After the 30 minutes to 2 hours, with the four variables in `.env`:
 
 It prints only `token: ok`, `group: <n> members`, `vip: ok|<error code>` and
 `non-vip: refused|READABLE (scope not applied)` (never the secret or a token) and exits 0 only when the VIP's
-mail folders are readable and the non-VIP's are refused. `READABLE` means an Entra Mail permission is still
+mail folders are readable and the non-VIP's are refused. Any other code on the non-VIP line (for example
+`not_found` for a mistyped address) also exits 1. `READABLE` means an Entra Mail permission is still
 granted (step 2) or the scope is wrong.
 
 ## Tests
