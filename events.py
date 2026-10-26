@@ -8,7 +8,7 @@ import json
 import logging
 import threading
 
-from subscriptions import folder_of, mail_resource
+from subscriptions import mail_resource, mailbox_folder_of
 
 log = logging.getLogger("outlook_mcp.events")
 
@@ -114,11 +114,14 @@ class NotificationRouter:
         failure is logged, never raised: the wake (and the rest of the batch) still goes through."""
         data = n.get("resourceData")
         mid = data.get("id") if isinstance(data, dict) else None
-        folder_id = folder_of(sub["resource"])
-        if not mid or not folder_id:
+        where = mailbox_folder_of(sub["resource"])
+        if not mid or not where:
             return
+        mailbox_id, folder_id = where
+        # The queue scope of the folder: "{folder}|{sig}" for a user, "{mailbox}|{folder}|{sig}" for an organization.
+        prefix = f"{folder_id}|" if mailbox_id is None else f"{mailbox_id}|{folder_id}|"
         try:
-            reset = self.store.arrived_again(sub["key_id"], folder_id, mid, self.keeper.cfg.drop_lease_s)
+            reset = self.store.arrived_again(sub["key_id"], prefix, mid, self.keeper.cfg.drop_lease_s)
         except Exception as e:  # noqa: BLE001 -- e.g. sqlite busy; the delta round and the lease still work
             log.warning("created notification: resource=%s message=%s reset failed: %s", sub["resource"], mid, e)
             return
@@ -224,9 +227,9 @@ class Waiter:
         with self._lock:
             if connection_key in self._departures:
                 return
-            self._departures.add(connection_key)
-        self.mail.directory(connection_key).on_departed(
-            lambda gone: self.keeper.drop_mailboxes(connection_key, [box.id for box in gone]))
+            self.mail.directory(connection_key).on_departed(
+                lambda gone: self.keeper.drop_mailboxes(connection_key, [box.id for box in gone]))
+            self._departures.add(connection_key)                # only once the hook is in
 
     async def wait(self, prep: dict, timeout_s) -> dict:
         try:
@@ -240,8 +243,7 @@ class Waiter:
             return self._ready(prep, "pending")
         if due <= now:
             return self._ready(prep, "fallback")
-        if await (self.wakes.wait(keys[0], min(timeout, due - now)) if len(keys) == 1
-                  else self.wakes.wait_any(keys, min(timeout, due - now))):
+        if await self.wakes.wait_any(keys, min(timeout, due - now)):
             return self._ready(prep, "event")
         if self.clock() >= due:
             return self._ready(prep, "fallback")

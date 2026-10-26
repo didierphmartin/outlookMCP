@@ -3,9 +3,10 @@ import dataclasses
 import threading
 import time
 
+import httpx
 import pytest
 
-from subscriptions import folder_of, mail_resource
+from subscriptions import folder_of, mail_resource, mailbox_folder_of
 from tests.test_events import HUB
 from tests.test_org_connect import org_cfg  # noqa: F401 -- the fixture
 from tests.test_org_mail import DROP, drop_folder, later
@@ -39,6 +40,9 @@ def test_folder_of_parses_both_forms():
     assert folder_of(mail_resource("f-1")) == "f-1"
     assert folder_of(mail_resource("f-1", "u-bob")) == "f-1"
     assert folder_of("users/u-bob/messages") is None and folder_of("") is None
+    assert mailbox_folder_of(mail_resource("f-1")) == (None, "f-1")
+    assert mailbox_folder_of(mail_resource("f-1", "u-bob")) == ("u-bob", "f-1")
+    assert mailbox_folder_of("subscriptions") is None
 
 
 def test_wait_ready_on_event_from_any_mailbox(fake, http, ocfg):
@@ -111,3 +115,81 @@ def test_left_mailbox_subscription_dropped(fake, http, ocfg):
     wait(c, key, timeout=0.2)
     assert subscribed(fake) == [mail_resource(fid, "u-bob")] and alice not in fake.subscriptions
     assert c.app.state.keeper.store.subscription(key, mail_resource(fid, "u-alice")) is None
+
+
+def test_left_mailbox_drop_failure_never_fails_the_wait(fake, http, ocfg, caplog):
+    c, key = org_app(fake, http, ocfg)
+    wait(c, key)
+    keeper = c.app.state.keeper
+
+    def unreachable(_key):
+        raise httpx.ConnectError("graph unreachable")
+    keeper.graph_for = unreachable                           # the DELETE of Alice's subscription cannot go out
+    fake.mailboxes["u-alice"]["in_group"] = False
+    later(c)
+    with caplog.at_level("WARNING", logger="outlook_mcp"):
+        assert wait(c, key, timeout=0.2)["status"] in ("ready", "timeout")
+    assert "u-alice" in caplog.text and "graph unreachable" in caplog.text
+
+
+# "created" notifications in drop mode --------------------------------------------------------
+def exhaust(c, key):
+    """Claims the one drop email until its attempts run out (3, each after the lease); returns its id."""
+    ids = set()
+    for attempt in (1, 2, 3):
+        mail = call(c, "poll_new_mail", DROP, key=key)["mail"]
+        assert mail["attempt"] == attempt
+        ids.add(mail["id"])
+        later(c, 600)
+    assert call(c, "poll_new_mail", DROP, key=key) == {"mail": None}
+    [mail_id] = ids
+    return mail_id
+
+
+def created(c, key, resource, mid):
+    """Graph's "created" notification on this connection's subscription of resource, naming message mid."""
+    sub = c.app.state.keeper.store.subscription(key, resource)
+    c.app.state.router.handle({"value": [{"subscriptionId": sub["sub_id"], "clientState": sub["client_state"],
+                                          "changeType": "created", "resourceData": {"id": mid}}]})
+
+
+def test_org_drop_created_notification_retries_an_exhausted_email(fake, http, ocfg):
+    c, key = org_app(fake, http, ocfg)
+    wait(c, key)
+    call(c, "poll_new_mail", DROP, key=key)                                          # baseline
+    mid = fake.add_message(folder="To SharePoint", subject="vip", mailbox="u-bob")
+    assert exhaust(c, key) == f"u-bob~{mid}"
+    fake.notify_created(mid)                                 # dragged out and back into Bob's drop folder
+    mail = call(c, "poll_new_mail", DROP, key=key)["mail"]
+    assert mail["id"] == f"u-bob~{mid}" and mail["attempt"] == 1
+
+
+def test_created_notification_never_crosses_connections(fake, http, ocfg):
+    """Same folder id, same message id on both sides: a user's me/... notification never resets or wakes the
+    organization's scope, and an organization mailbox's never touches the user's."""
+    c, org = org_app(fake, http, ocfg)
+    user = connect(c, fake)
+    for key in (org, user):
+        wait(c, key)
+        call(c, "poll_new_mail", DROP, key=key)                                      # baselines
+    mb = fake.add_message(folder="To SharePoint", subject="vip", mailbox="u-bob")
+    mu = fake.add_message(folder="To SharePoint", subject="mine")
+    for attempt in (1, 2, 3):
+        assert call(c, "poll_new_mail", DROP, key=org)["mail"]["attempt"] == attempt
+        assert call(c, "poll_new_mail", DROP, key=user)["mail"]["attempt"] == attempt
+        later(c, 600)
+    fid, store, wakes = drop_folder(fake), c.app.state.keeper.store, c.app.state.wakes
+    org_keys = [(store.key_id(org), mail_resource(fid, b)) for b in ("u-alice", "u-bob")]
+    user_key = (store.key_id(user), mail_resource(fid))
+    wakes.take_any([*org_keys, user_key])
+
+    created(c, user, mail_resource(fid), mb)                 # the org's message id, on the user's subscription
+    assert call(c, "poll_new_mail", DROP, key=org) == {"mail": None}
+    assert not wakes.take_any(org_keys) and wakes.take_any([user_key])               # only its own folder woke
+    created(c, org, mail_resource(fid, "u-bob"), mu)         # the user's message id, on Bob's subscription
+    assert call(c, "poll_new_mail", DROP, key=user) == {"mail": None}
+    assert not wakes.take_any([user_key]) and wakes.take_any(org_keys)
+
+    created(c, org, mail_resource(fid, "u-bob"), mb)         # its own subscription: reset and woken
+    assert wakes.take_any(org_keys)
+    assert call(c, "poll_new_mail", DROP, key=org)["mail"]["attempt"] == 1

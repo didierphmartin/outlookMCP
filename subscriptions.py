@@ -3,6 +3,7 @@ dropped when nobody has waited for a day. One subscription per (connection, fold
 filter set on that folder."""
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 import threading
@@ -16,6 +17,8 @@ RENEW_BEFORE_S = 24 * 3600     # renew a subscription that expires within a day
 IDLE_S = 24 * 3600             # drop a subscription nobody has waited on for a day
 TICK_S = 15 * 60
 
+log = logging.getLogger("outlook_mcp.subscriptions")
+
 
 def mail_resource(folder_id: str, mailbox_id: str | None = None) -> str:
     """The signed-in user's folder (me/...), or a mailbox of an organization connection (users/{id}/...)."""
@@ -23,10 +26,16 @@ def mail_resource(folder_id: str, mailbox_id: str | None = None) -> str:
     return f"{root}/mailFolders('{folder_id}')/messages"
 
 
+def mailbox_folder_of(resource: str) -> tuple[str | None, str] | None:
+    """(mailbox id, folder id) of a mail_resource: mailbox id None for me/...; None for any other resource."""
+    m = re.fullmatch(r"(?:me|users/([^/]+))/mailFolders\('(.+)'\)/messages", resource or "")
+    return (m.group(1), m.group(2)) if m else None
+
+
 def folder_of(resource: str) -> str | None:
     """The folder id of a mail_resource (either form), None for any other resource."""
-    m = re.fullmatch(r"(?:me|users/[^/]+)/mailFolders\('(.+)'\)/messages", resource or "")
-    return m.group(1) if m else None
+    found = mailbox_folder_of(resource)
+    return found[1] if found else None
 
 
 def iso(epoch: float) -> str:
@@ -107,7 +116,10 @@ class SubscriptionKeeper:
         prefixes = tuple(f"users/{m}/" for m in mailbox_ids)
         for sub in self.store.subscriptions():
             if sub["key_id"] == kid and sub["resource"].startswith(prefixes):
-                self.drop(sub)
+                try:
+                    self.drop(sub)
+                except Exception as e:  # noqa: BLE001 -- runs inside a group re-read: never fails a poll or a wait
+                    log.warning("subscription %s of a departed mailbox not dropped: %s", sub["resource"], _reason(e))
 
     def tick(self) -> None:
         """Every TICK_S: drop idle watches, renew the ones close to expiry, retry the ones that failed."""

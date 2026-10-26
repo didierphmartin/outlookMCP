@@ -170,7 +170,7 @@ def test_timeout_is_capped(svc, parts, ecfg):
         asked.append(timeout)
         return False
 
-    wakes.wait = fake_wait
+    wakes.wait_any = fake_wait
     prep = waiter.prepare("key-1", {"args": {"folder": "Inbox"}})
     assert asyncio.run(waiter.wait(prep, None))["via"] == "fallback"      # first wait after start
     asyncio.run(waiter.wait(prep, 1000))
