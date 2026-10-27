@@ -302,6 +302,55 @@ mail folders are readable and the non-VIP's are refused. Any other code on the n
 `not_found` for a mistyped address) also exits 1. `READABLE` means an Entra Mail permission is still
 granted (step 2) or the scope is wrong.
 
+### Run the VIP mail-drop workflow (SynergyAI wf 75)
+
+Once the admin procedure is done and `org_check.py` passes. Start this server with `./run.sh` (plain
+`python server.py` skips `.env`).
+
+**Before the first run (SynergyAI side, once):** the robot-publish code (gpt `feat/vip-mailboxes`) is
+deployed; its migration `2026-10-26_workflow_robot_publish.sql` is applied; code components "Outlook: get
+dropped email" and "SharePoint: move" are updated from `backend/resources/code_components/mail_drop.py` and
+`sharepoint_move.py` (otherwise the email carries no mailbox and `{mailbox_name}` is not filled).
+
+**Prepare the workflow:**
+
+1. Duplicate wf 75 "Move Email to Sharepoint" (e.g. "VIP mail drop"); the original stays a one-mailbox
+   workflow.
+2. On the "SharePoint: move" node, set `folder` to `VIP/{mailbox_name}` (wf 75 has a fixed name there).
+   `{mailbox}` (the address) works too.
+3. Keep the Start args `folder: "To SharePoint"`, `done_folder: "Filed"`: every VIP mailbox uses them.
+
+**Interpreter (runs as the robot):**
+
+4. As a user with the `use_robot` right, workflow editor, **Publish to robot**.
+5. Robot tab, **Robot connections**: add "Outlook" (`http://127.0.0.1:8770/mcp`), press **Connect the
+   organization's VIP mailboxes**; add "SharePoint" (`http://127.0.0.1:8771/mcp`) and sign in with the account
+   that writes to the team library. No server may be left in the publish's "needs servers" list.
+6. Activate the robot's copy. The SynergyAI event worker must be running; runs appear in the Robot tab's run
+   log.
+
+**Compiled code (LangGraph, ADK, MAF or NOOA):**
+
+4. Compile the copy from step 1.
+5. Get an organization key from this server: `connect_start {"method": "organization"}`, then
+   `connect_status {connect_id}`; it returns `connection_key` once, with `credential_header`
+   (`X-Outlook-Account`). The key saved in the robot's connections is never shown, so take a new one here.
+6. In the compiled folder's `.env`:
+
+   ```
+   MCP_HEADERS_OUTLOOK={"X-Outlook-Account": "<organization key>"}
+   MCP_HEADERS_SHAREPOINT={"<SharePoint credential_header>": "<SharePoint key>"}
+   ```
+
+   (`MCP_URL_<SLUG>` only if a server is not at its registered URL.)
+7. `python <script> --watch`.
+
+Run one of the two at a time, not both: each uses its own organization key on the same drop folders.
+
+**Accept (L2, L3):** two VIPs and one non-VIP each drop an email: two are filed in `VIP/<name>/…`, the
+non-VIP's is untouched. A VIP removed from the group stops being processed within the scope's cache delay;
+the others go on. From then on, adding or removing a VIP is a change of the group's members only.
+
 ## Tests
 
 ```bash
