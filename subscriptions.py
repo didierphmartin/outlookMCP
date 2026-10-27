@@ -81,7 +81,7 @@ class SubscriptionKeeper:
         return self.store.subscription(connection_key, resource)
 
     def _url(self) -> str:
-        return self.cfg.notification_url or "EventHub:fake"
+        return self.cfg.notification_url or "EventHub:mock"
 
     def renew(self, sub: dict) -> None:
         """Push the expiry out again (also what Graph's reauthorizationRequired asks for). A subscription Graph

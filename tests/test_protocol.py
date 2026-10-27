@@ -40,7 +40,7 @@ def test_notifications_are_acknowledged(tmp_path):
 
 def test_from_env_requires_ids(monkeypatch):
     monkeypatch.delenv("OUTLOOK_CLIENT_ID", raising=False)
-    monkeypatch.delenv("OUTLOOK_FAKE_GRAPH", raising=False)
+    monkeypatch.delenv("OUTLOOK_MOCK_GRAPH", raising=False)
     import pytest
     with pytest.raises(SystemExit, match="OUTLOOK_CLIENT_ID"):
         AppConfig.from_env()

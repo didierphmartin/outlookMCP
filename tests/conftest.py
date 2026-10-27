@@ -4,17 +4,17 @@ import httpx
 import pytest
 
 from config import AppConfig
-from fake_graph import FakeGraph
+from mock_graph import MockGraph
 
 
 @pytest.fixture
-def fake():
-    return FakeGraph()
+def mock():
+    return MockGraph()
 
 
 @pytest.fixture
-def http(fake):
-    return httpx.Client(transport=httpx.MockTransport(fake.handler))
+def http(mock):
+    return httpx.Client(transport=httpx.MockTransport(mock.handler))
 
 
 @pytest.fixture
@@ -27,14 +27,14 @@ NOW = "2026-10-07T10:00:00Z"   # the mail service's "now" in tests: messages at 
 
 
 @pytest.fixture
-def svc(fake, http, cfg):
-    """A MailService over FakeGraph with one stored connection, "key-1". (mail.py arrives in Task B5.)"""
+def svc(mock, http, cfg):
+    """A MailService over MockGraph with one stored connection, "key-1". (mail.py arrives in Task B5.)"""
     from auth import Auth
     from graph import GraphClient, TokenSource
     from mail import MailService
     from store import Store
     signed_in = datetime.fromisoformat(NOW.replace("Z", "+00:00")).timestamp()
     store = Store(cfg.db_path, cfg.secret_key, clock=lambda: signed_in)   # the sign-in happens at NOW
-    store.save_connection("key-1", fake.account, fake.tenant, fake._tokens_response().json()["refresh_token"])
+    store.save_connection("key-1", mock.account, mock.tenant, mock._tokens_response().json()["refresh_token"])
     graph_for = lambda key: GraphClient(http, cfg.graph_base, TokenSource(Auth(http, cfg), store, key))
     return MailService(graph_for, store, cfg, now_iso=lambda: NOW)

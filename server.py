@@ -199,7 +199,7 @@ def _wrap(payload) -> dict:
     return {"content": text, "structuredContent": payload}
 
 
-def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, clock=time.time, sleep=time.sleep) -> FastAPI:
+def create_app(cfg: AppConfig, http: httpx.Client | None = None, mock=None, clock=time.time, sleep=time.sleep) -> FastAPI:
     from auth import Auth, AuthError, Connector
     from graph import AppTokenSource, GraphClient, TokenSource
     from events import EventHubListener, NotificationRouter, Waiter, Wakes
@@ -207,13 +207,13 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
     from store import Store
     from subscriptions import SubscriptionKeeper
 
-    if http is None and cfg.fake_graph:
-        from fake_graph import FakeGraph
-        fake = FakeGraph()
-        fake.device_state = "connected"
-        _seed(fake, cfg.fake_seed)
+    if http is None and cfg.mock_graph:
+        from mock_graph import MockGraph
+        mock = MockGraph()
+        mock.device_state = "connected"
+        _seed(mock, cfg.mock_seed)
     if http is None:
-        http = httpx.Client(transport=httpx.MockTransport(fake.handler)) if fake else httpx.Client()
+        http = httpx.Client(transport=httpx.MockTransport(mock.handler)) if mock else httpx.Client()
 
     state = {}
 
@@ -223,7 +223,7 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
         and the Event Hub listener when one is configured."""
         stop = threading.Event()
         threading.Thread(target=keeper.run, args=(stop,), name="subscription-keeper", daemon=True).start()
-        if cfg.eventhub_connection and not cfg.fake_graph:
+        if cfg.eventhub_connection and not cfg.mock_graph:
             listener = EventHubListener(cfg, store, router)
             waiter.listener_error = lambda: listener.error
             listener.start()
@@ -254,8 +254,8 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
     router = NotificationRouter(store, keeper, wakes)
     waiter = Waiter(mail, keeper, wakes, store, cfg, clock=now)
     app.state.keeper, app.state.router, app.state.wakes = keeper, router, wakes
-    if fake is not None:
-        fake.on_notification = router.handle               # fake mode: Graph "delivers" in-process
+    if mock is not None:
+        mock.on_notification = router.handle               # mock mode: Graph "delivers" in-process
 
     tools = [dict(t) for t in TOOLS]
     if cfg.org_enabled:                                  # the organization method is offered only when configured
@@ -357,25 +357,25 @@ def create_app(cfg: AppConfig, http: httpx.Client | None = None, fake=None, cloc
         except Exception as e:  # noqa: BLE001 -- the code only: messages may echo service responses
             return _page(f"Sign-in failed ({getattr(e, 'code', type(e).__name__)}). Start again from the app.")
 
-    if fake is not None and cfg.fake_graph:
-        @app.post("/fake/messages")
-        async def fake_add(request: Request):
+    if mock is not None and cfg.mock_graph:
+        @app.post("/mock/messages")
+        async def mock_add(request: Request):
             m = await request.json()
             atts = [(a["name"], a.get("content_type", "text/plain"), a.get("text", "").encode()) for a in m.get("attachments", [])]
-            mid = fake.add_message(folder=m.get("folder", "inbox"), subject=m.get("subject", ""),
+            mid = mock.add_message(folder=m.get("folder", "inbox"), subject=m.get("subject", ""),
                                    sender=m.get("sender", "a@b.c"),
                                    received=m.get("received") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                    attachments=atts, body_html=m.get("body_html", "<p>hi</p>"))
             return {"id": mid}
 
-        @app.get("/fake/requests")
-        def fake_requests():
-            return {"requests": fake.requests}
+        @app.get("/mock/requests")
+        def mock_requests():
+            return {"requests": mock.requests}
 
-        @app.post("/fake/device")
-        async def fake_device(request: Request):
-            fake.device_state = (await request.json()).get("state", "connected")
-            return {"state": fake.device_state}
+        @app.post("/mock/device")
+        async def mock_device(request: Request):
+            mock.device_state = (await request.json()).get("state", "connected")
+            return {"state": mock.device_state}
 
     return app
 
@@ -386,12 +386,12 @@ def _page(message: str, status: int = 200) -> HTMLResponse:
                         status_code=status)
 
 
-def _seed(fake, path: str) -> None:
+def _seed(mock, path: str) -> None:
     if not path:
         return
     with open(path, encoding="utf-8") as f:
         for m in json.load(f):
-            fake.add_message(folder=m.get("folder", "inbox"), subject=m.get("subject", ""), sender=m.get("sender", "a@b.c"),
+            mock.add_message(folder=m.get("folder", "inbox"), subject=m.get("subject", ""), sender=m.get("sender", "a@b.c"),
                              received=m.get("received", "2099-01-01T00:00:00Z"),
                              attachments=[(a["name"], a.get("content_type", "text/plain"), a.get("text", "").encode())
                                           for a in m.get("attachments", [])])

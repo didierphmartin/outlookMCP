@@ -14,35 +14,35 @@ def poll(svc, **args):
     return svc.poll_new_mail("key-1", {"folder": "Inbox", **args})
 
 
-def test_old_mail_is_not_replayed(fake, svc):
-    fake.add_message(subject="old", received="2026-10-07T09:00:00Z")
+def test_old_mail_is_not_replayed(mock, svc):
+    mock.add_message(subject="old", received="2026-10-07T09:00:00Z")
     assert poll(svc) == {"mail": None}
 
 
-def test_mail_sent_after_sign_in_counts_before_the_first_poll(fake, svc):
+def test_mail_sent_after_sign_in_counts_before_the_first_poll(mock, svc):
     # Sign-in at NOW (10:00), first poll at 12:00: mail of 10:30 is new; mail before the sign-in is not.
     later = MailService(svc.graph_for, svc.store, svc.cfg, now_iso=lambda: "2026-10-07T12:00:00Z")
-    fake.add_message(subject="before sign-in", received="2026-10-07T09:59:00Z")
-    fake.add_message(subject="test 5", received="2026-10-07T10:30:00Z")
+    mock.add_message(subject="before sign-in", received="2026-10-07T09:59:00Z")
+    mock.add_message(subject="test 5", received="2026-10-07T10:30:00Z")
     assert later.poll_new_mail("key-1", {"folder": "Inbox"})["mail"]["subject"] == "test 5"
     assert later.poll_new_mail("key-1", {"folder": "Inbox"}) == {"mail": None}
     # A second folder + filter set of the same connection starts at its own first poll: nothing replayed.
     assert later.poll_new_mail("key-1", {"folder": "Inbox", "subject_contains": "test"}) == {"mail": None}
 
 
-def test_one_per_call_oldest_first_never_twice(fake, svc):
+def test_one_per_call_oldest_first_never_twice(mock, svc):
     poll(svc)                                            # first use: cursor starts now
-    fake.add_message(subject="b", received="2026-10-07T10:02:00Z")
-    fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
-    fake.add_message(subject="c", received="2026-10-07T10:03:00Z")
+    mock.add_message(subject="b", received="2026-10-07T10:02:00Z")
+    mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="c", received="2026-10-07T10:03:00Z")
     got = [poll(svc)["mail"]["subject"] for _ in range(3)]
     assert got == ["a", "b", "c"]
     assert poll(svc) == {"mail": None}
 
 
-def test_mail_shape_and_attachments_never_opened(fake, svc):
+def test_mail_shape_and_attachments_never_opened(mock, svc):
     poll(svc)
-    fake.add_message(subject="Invoice", sender="billing@acme.com", received="2026-10-07T10:01:00Z",
+    mock.add_message(subject="Invoice", sender="billing@acme.com", received="2026-10-07T10:01:00Z",
                      attachments=[("invoice.pdf", "application/pdf", b"%PDF-1.4 ...")],
                      body_html="<p>Hello <b>John</b></p><script>x()</script>")
     mail = poll(svc)["mail"]
@@ -52,46 +52,46 @@ def test_mail_shape_and_attachments_never_opened(fake, svc):
     assert mail["attachments"] == [{"id": mail["id"] + "-a0", "name": "invoice.pdf",
                                     "content_type": "application/pdf", "size": 12, "is_inline": False,
                                     "kind": "file"}]
-    assert not [p for m, p in fake.requests if "/attachments/" in p], "a poll must never fetch attachment content"
-    assert not [p for m, p in fake.requests if "contentBytes" in p]
+    assert not [p for m, p in mock.requests if "/attachments/" in p], "a poll must never fetch attachment content"
+    assert not [p for m, p in mock.requests if "contentBytes" in p]
 
 
-def test_filters(fake, svc):
+def test_filters(mock, svc):
     poll(svc, **{"from": "acme.com"})
-    fake.add_message(subject="x", sender="spam@evil.biz", received="2026-10-07T10:01:00Z")
-    fake.add_message(subject="Invoice 4", sender="billing@ACME.com", received="2026-10-07T10:02:00Z")
+    mock.add_message(subject="x", sender="spam@evil.biz", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="Invoice 4", sender="billing@ACME.com", received="2026-10-07T10:02:00Z")
     assert poll(svc, **{"from": "acme.com"})["mail"]["subject"] == "Invoice 4"
     assert poll(svc, **{"from": "acme.com"}) == {"mail": None}
 
 
-def test_two_filter_sets_each_get_their_mail(fake, svc):
+def test_two_filter_sets_each_get_their_mail(mock, svc):
     poll(svc, subject_contains="invoice")
     poll(svc)
-    fake.add_message(subject="Invoice 7", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="Invoice 7", received="2026-10-07T10:01:00Z")
     assert poll(svc, subject_contains="invoice")["mail"]["subject"] == "Invoice 7"
     assert poll(svc)["mail"]["subject"] == "Invoice 7"
 
 
-def test_paging_through_delta(fake, svc):
+def test_paging_through_delta(mock, svc):
     poll(svc)
     for i in range(5):
-        fake.add_message(subject=f"s{i}", received=f"2026-10-07T10:0{i + 1}:00Z")
+        mock.add_message(subject=f"s{i}", received=f"2026-10-07T10:0{i + 1}:00Z")
     assert [poll(svc)["mail"]["subject"] for _ in range(5)] == [f"s{i}" for i in range(5)]
 
 
-def test_message_deleted_before_fetch_is_skipped(fake, svc):
+def test_message_deleted_before_fetch_is_skipped(mock, svc):
     poll(svc)
-    a = fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
-    fake.add_message(subject="b", received="2026-10-07T10:02:00Z")
+    a = mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="b", received="2026-10-07T10:02:00Z")
     svc._refresh_queue_for_tests("key-1", "Inbox", {})   # both queued
-    del fake.messages[a]                                  # gone before fetch
+    del mock.messages[a]                                  # gone before fetch
     assert poll(svc)["mail"]["subject"] == "b"
 
 
-def test_restart_keeps_queue_and_cursor(fake, http, cfg, svc):
+def test_restart_keeps_queue_and_cursor(mock, http, cfg, svc):
     poll(svc)
-    fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
-    fake.add_message(subject="b", received="2026-10-07T10:02:00Z")
+    mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="b", received="2026-10-07T10:02:00Z")
     assert poll(svc)["mail"]["subject"] == "a"
     store2 = Store(cfg.db_path, cfg.secret_key)
     svc2 = MailService(lambda key: GraphClient(http, cfg.graph_base, TokenSource(Auth(http, cfg), store2, key)),
@@ -100,114 +100,114 @@ def test_restart_keeps_queue_and_cursor(fake, http, cfg, svc):
     assert poll(svc2) == {"mail": None}
 
 
-def test_reconnect_needed(fake, svc):
-    fake.revoke_refresh()
+def test_reconnect_needed(mock, svc):
+    mock.revoke_refresh()
     assert poll(svc)["error"] == "reconnect_needed"
 
 
-def test_unknown_folder(fake, svc):
+def test_unknown_folder(mock, svc):
     assert poll(svc, folder="Nope")["error"] == "unknown_folder"
 
 
 # realistic delta ---------------------------------------------------------------------
 
-def test_delta_pages_newest_first_still_deliver_oldest_first(fake, svc):
+def test_delta_pages_newest_first_still_deliver_oldest_first(mock, svc):
     poll(svc)
     for i in range(5):
-        fake.add_message(subject=f"s{i}", received=f"2026-10-07T10:0{i + 1}:00Z")
-    raw = fake._delta("inbox-id", {"$filter": [f"receivedDateTime ge {NOW}"]}).json()["value"]
-    assert [m["subject"] for m in raw] == ["s4", "s3"], "the fake must not hand out oldest-first pages"
+        mock.add_message(subject=f"s{i}", received=f"2026-10-07T10:0{i + 1}:00Z")
+    raw = mock._delta("inbox-id", {"$filter": [f"receivedDateTime ge {NOW}"]}).json()["value"]
+    assert [m["subject"] for m in raw] == ["s4", "s3"], "the mock must not hand out oldest-first pages"
     assert [poll(svc)["mail"]["subject"] for _ in range(5)] == [f"s{i}" for i in range(5)]
 
 
-def test_changed_message_is_never_delivered_twice(fake, svc):
+def test_changed_message_is_never_delivered_twice(mock, svc):
     poll(svc)
-    a = fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    a = mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
     assert poll(svc)["mail"]["subject"] == "a"
-    fake.touch_message(a)                                 # read/flagged: delta sends it again
+    mock.touch_message(a)                                 # read/flagged: delta sends it again
     assert poll(svc) == {"mail": None}
 
 
-def test_touch_message_is_resent_by_delta(fake):
-    a = fake.add_message(subject="a")
-    link = fake._delta("inbox-id", {}).json()["@odata.deltaLink"]
+def test_touch_message_is_resent_by_delta(mock):
+    a = mock.add_message(subject="a")
+    link = mock._delta("inbox-id", {}).json()["@odata.deltaLink"]
     token = link.split("$deltatoken=")[1].split("&")[0]
-    assert fake._delta("inbox-id", {"$deltatoken": [token]}).json()["value"] == []
-    fake.touch_message(a)
-    assert [m["id"] for m in fake._delta("inbox-id", {"$deltatoken": [token]}).json()["value"]] == [a]
+    assert mock._delta("inbox-id", {"$deltatoken": [token]}).json()["value"] == []
+    mock.touch_message(a)
+    assert [m["id"] for m in mock._delta("inbox-id", {"$deltatoken": [token]}).json()["value"]] == [a]
 
 
-def test_delta_link_keeps_the_received_filter(fake, svc):
+def test_delta_link_keeps_the_received_filter(mock, svc):
     poll(svc)
     poll(svc)
-    later = [p for _, p in fake.requests if "/messages/delta" in p][1:]
+    later = [p for _, p in mock.requests if "/messages/delta" in p][1:]
     assert later and all("deltatoken" in p and "receivedDateTime" in p for p in later)
 
 
-def test_touched_old_mail_is_not_replayed(fake, svc):
-    old = fake.add_message(subject="old", received="2026-10-07T09:00:00Z")
+def test_touched_old_mail_is_not_replayed(mock, svc):
+    old = mock.add_message(subject="old", received="2026-10-07T09:00:00Z")
     poll(svc)
-    fake.touch_message(old)
+    mock.touch_message(old)
     assert poll(svc) == {"mail": None}
 
 
 # folders ---------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("status", [None, 404, 400])
-def test_folder_by_display_name(fake, svc, status):
-    fake.folder_name_status = status
+def test_folder_by_display_name(mock, svc, status):
+    mock.folder_name_status = status
     poll(svc, folder="Projects")
-    fake.add_message(folder="projects-id", subject="p", received="2026-10-07T10:01:00Z")
-    fake.add_message(subject="inbox mail", received="2026-10-07T10:02:00Z")
+    mock.add_message(folder="projects-id", subject="p", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="inbox mail", received="2026-10-07T10:02:00Z")
     assert poll(svc, folder="Projects")["mail"]["subject"] == "p"
     assert poll(svc, folder="Projects") == {"mail": None}
 
 
 @pytest.mark.parametrize("status", [None, 404, 400])
-def test_child_folder_path(fake, svc, status):
-    fake.folder_name_status = status
+def test_child_folder_path(mock, svc, status):
+    mock.folder_name_status = status
     poll(svc, folder="Inbox/Invoices")
-    fake.add_message(folder="invoices-id", subject="i", received="2026-10-07T10:01:00Z")
+    mock.add_message(folder="invoices-id", subject="i", received="2026-10-07T10:01:00Z")
     assert poll(svc, folder="Inbox/Invoices")["mail"]["subject"] == "i"
 
 
 # errors ----------------------------------------------------------------------------------
 
-def make_svc(fake, cfg, http, store, slept=None):
+def make_svc(mock, cfg, http, store, slept=None):
     graph_for = lambda key: GraphClient(http, cfg.graph_base, TokenSource(Auth(http, cfg), store, key),
                                         sleep=(slept if slept is not None else []).append)
     return MailService(graph_for, store, cfg, now_iso=lambda: NOW)
 
 
 @pytest.fixture
-def store(fake, cfg):
+def store(mock, cfg):
     signed_in = datetime.fromisoformat(NOW.replace("Z", "+00:00")).timestamp()
     s = Store(cfg.db_path, cfg.secret_key, clock=lambda: signed_in)   # the sign-in happens at NOW
-    s.save_connection("key-1", fake.account, fake.tenant, fake._tokens_response().json()["refresh_token"])
+    s.save_connection("key-1", mock.account, mock.tenant, mock._tokens_response().json()["refresh_token"])
     return s
 
 
-def test_throttled_after_one_wait(fake, cfg, http, store):
+def test_throttled_after_one_wait(mock, cfg, http, store):
     slept = []
-    svc = make_svc(fake, cfg, http, store, slept)
+    svc = make_svc(mock, cfg, http, store, slept)
     poll(svc)
-    fake.throttle_next = 2
+    mock.throttle_next = 2
     assert poll(svc)["error"] == "throttled"
     assert slept == [2.0]
 
 
-def test_transport_error_is_an_error_result(fake, cfg, store):
+def test_transport_error_is_an_error_result(mock, cfg, store):
     def boom(request):
         raise httpx.ConnectError("refused", request=request)
-    svc = make_svc(fake, cfg, httpx.Client(transport=httpx.MockTransport(boom)), store)
+    svc = make_svc(mock, cfg, httpx.Client(transport=httpx.MockTransport(boom)), store)
     result = poll(svc)
     assert set(result) == {"error", "message"}
 
 
-def test_graph_failure_on_fetch_keeps_the_mail_for_the_next_poll(fake, svc, monkeypatch):
+def test_graph_failure_on_fetch_keeps_the_mail_for_the_next_poll(mock, svc, monkeypatch):
     poll(svc)
-    a = fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
-    real = fake._graph
+    a = mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    real = mock._graph
     failed = []
 
     def flaky(path, q):
@@ -215,59 +215,59 @@ def test_graph_failure_on_fetch_keeps_the_mail_for_the_next_poll(fake, svc, monk
             failed.append(path)
             return httpx.Response(503, json={"error": {"code": "ServiceUnavailable"}})
         return real(path, q)
-    monkeypatch.setattr(fake, "_graph", flaky)
+    monkeypatch.setattr(mock, "_graph", flaky)
     assert poll(svc)["error"] == "graph_error"
     assert poll(svc)["mail"]["subject"] == "a"
     assert poll(svc) == {"mail": None}
 
 
-def test_one_graph_client_per_connection(fake, cfg, http, store):
+def test_one_graph_client_per_connection(mock, cfg, http, store):
     built = []
     svc = MailService(lambda key: built.append(key) or GraphClient(
         http, cfg.graph_base, TokenSource(Auth(http, cfg), store, key)), store, cfg, now_iso=lambda: NOW)
     for _ in range(3):
         poll(svc)
     assert built == ["key-1"]
-    token_calls = [p for _, p in fake.requests if p.endswith("/oauth2/v2.0/token")]
+    token_calls = [p for _, p in mock.requests if p.endswith("/oauth2/v2.0/token")]
     assert len(token_calls) == 1
 
 
 # fix round 1 -------------------------------------------------------------------------------
 
-def test_refresh_transport_error_is_network_error_not_reconnect(fake, cfg, store):
+def test_refresh_transport_error_is_network_error_not_reconnect(mock, cfg, store):
     def handler(request):
         if request.url.path.endswith("/oauth2/v2.0/token"):
             raise httpx.ConnectError("dns failure", request=request)
-        return fake.handler(request)
-    svc = make_svc(fake, cfg, httpx.Client(transport=httpx.MockTransport(handler)), store)
+        return mock.handler(request)
+    svc = make_svc(mock, cfg, httpx.Client(transport=httpx.MockTransport(handler)), store)
     assert poll(svc)["error"] == "network_error"
 
 
-def test_invalid_grant_is_still_reconnect_needed(fake, svc):
-    fake.revoke_refresh()
+def test_invalid_grant_is_still_reconnect_needed(mock, svc):
+    mock.revoke_refresh()
     result = poll(svc)
     assert result["error"] == "reconnect_needed" and "invalid_grant" in result["message"]
 
 
-def test_permanently_bad_message_is_reported_once_then_skipped(fake, svc, monkeypatch):
+def test_permanently_bad_message_is_reported_once_then_skipped(mock, svc, monkeypatch):
     poll(svc)
-    a = fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
-    fake.add_message(subject="b", received="2026-10-07T10:02:00Z")
-    real = fake._graph
+    a = mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="b", received="2026-10-07T10:02:00Z")
+    real = mock._graph
 
     def broken(path, q):
         if path == f"/me/messages/{a}":
             return httpx.Response(400, json={"error": {"code": "ErrorInvalidRequest"}})
         return real(path, q)
-    monkeypatch.setattr(fake, "_graph", broken)
+    monkeypatch.setattr(mock, "_graph", broken)
     assert poll(svc)["error"] == "graph_error"
     assert poll(svc)["mail"]["subject"] == "b"
     assert poll(svc) == {"mail": None}
 
 
-def test_unexpected_failure_is_internal_error(fake, svc, monkeypatch):
+def test_unexpected_failure_is_internal_error(mock, svc, monkeypatch):
     poll(svc)
-    fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
     monkeypatch.setattr("mail.Message.shape", classmethod(lambda cls, m: 1 / 0))
     result = poll(svc)
     assert result["error"] == "internal_error" and "ZeroDivisionError" in result["message"]
@@ -292,32 +292,32 @@ def test_body_text_separates_table_cells():
 
 # fix round B7 ----------------------------------------------------------------------------
 
-def _fetch_fails(fake, monkeypatch, mid, response, times):
+def _fetch_fails(mock, monkeypatch, mid, response, times):
     """The first `times` fetches of message `mid` answer `response()`; everything else is normal."""
-    real, left = fake._graph, [times]
+    real, left = mock._graph, [times]
 
     def flaky(path, q):
         if path == f"/me/messages/{mid}" and left[0]:
             left[0] -= 1
             return response()
         return real(path, q)
-    monkeypatch.setattr(fake, "_graph", flaky)
+    monkeypatch.setattr(mock, "_graph", flaky)
 
 
-def test_reconnect_needed_on_fetch_keeps_the_mail(fake, svc, monkeypatch):
+def test_reconnect_needed_on_fetch_keeps_the_mail(mock, svc, monkeypatch):
     poll(svc)
-    a = fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
-    _fetch_fails(fake, monkeypatch, a, lambda: httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken"}}),
+    a = mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    _fetch_fails(mock, monkeypatch, a, lambda: httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken"}}),
                  times=2)                                  # refused even after a refresh: reconnect_needed
     assert poll(svc)["error"] == "reconnect_needed"
     assert poll(svc)["mail"]["subject"] == "a"           # the user reconnected: the mail was not lost
     assert poll(svc) == {"mail": None}
 
 
-def test_non_json_fetch_body_keeps_the_mail(fake, svc, monkeypatch):
+def test_non_json_fetch_body_keeps_the_mail(mock, svc, monkeypatch):
     poll(svc)
-    a = fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
-    _fetch_fails(fake, monkeypatch, a, lambda: httpx.Response(200, content=b"<html>gateway</html>"), times=1)
+    a = mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    _fetch_fails(mock, monkeypatch, a, lambda: httpx.Response(200, content=b"<html>gateway</html>"), times=1)
     assert poll(svc)["error"] == "graph_error"
     assert poll(svc)["mail"]["subject"] == "a"
     assert poll(svc) == {"mail": None}
@@ -326,71 +326,71 @@ def test_non_json_fetch_body_keeps_the_mail(fake, svc, monkeypatch):
 # final review fixes ------------------------------------------------------------------------
 
 @pytest.mark.parametrize("status", [410, 400])
-def test_stale_delta_link_restarts_delta_without_redelivery(fake, svc, status):
+def test_stale_delta_link_restarts_delta_without_redelivery(mock, svc, status):
     poll(svc)
-    fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
-    fake.add_message(subject="b", received="2026-10-07T10:02:00Z")
+    mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="b", received="2026-10-07T10:02:00Z")
     assert poll(svc)["mail"]["subject"] == "a"
     assert poll(svc)["mail"]["subject"] == "b"
-    fake.delta_link_failure = status                     # the stored delta link is no longer valid
-    fake.add_message(subject="c", received="2026-10-07T10:03:00Z")
-    before = len(fake.requests)
+    mock.delta_link_failure = status                     # the stored delta link is no longer valid
+    mock.add_message(subject="c", received="2026-10-07T10:03:00Z")
+    before = len(mock.requests)
     assert poll(svc)["mail"]["subject"] == "c"
     assert poll(svc) == {"mail": None}                   # a and b are not delivered again
-    restarted = [p for _, p in fake.requests[before:] if "/messages/delta" in p and "deltatoken" not in p]
+    restarted = [p for _, p in mock.requests[before:] if "/messages/delta" in p and "deltatoken" not in p]
     # The rescan starts at the newest mail already queued (b, 10:02), not at the sign-in (10:00).
     assert len(restarted) == 1 and "receivedDateTime" in restarted[0] and "10%3A02%3A00Z" in restarted[0]
-    fake.add_message(subject="d", received="2026-10-07T10:04:00Z")
+    mock.add_message(subject="d", received="2026-10-07T10:04:00Z")
     assert poll(svc)["mail"]["subject"] == "d"           # the new delta link works
 
 
-def test_stale_delta_link_rescans_only_from_the_newest_queued_mail(fake, svc):
+def test_stale_delta_link_rescans_only_from_the_newest_queued_mail(mock, svc):
     # Months of handled mail must not be paged through again after the delta link is lost.
     poll(svc)
     for minute in range(1, 6):
-        fake.add_message(subject=f"m{minute}", received=f"2026-10-07T10:0{minute}:00Z")
+        mock.add_message(subject=f"m{minute}", received=f"2026-10-07T10:0{minute}:00Z")
     for minute in range(1, 6):
         assert poll(svc)["mail"]["subject"] == f"m{minute}"
-    fake.delta_link_failure = 410
-    fake.add_message(subject="late", received="2026-10-07T10:09:00Z")
-    before = len(fake.requests)
+    mock.delta_link_failure = 410
+    mock.add_message(subject="late", received="2026-10-07T10:09:00Z")
+    before = len(mock.requests)
     assert poll(svc)["mail"]["subject"] == "late"
     assert poll(svc) == {"mail": None}                   # m1..m5 not delivered again
-    restarted = [p for _, p in fake.requests[before:] if "/messages/delta" in p and "deltatoken" not in p]
+    restarted = [p for _, p in mock.requests[before:] if "/messages/delta" in p and "deltatoken" not in p]
     assert len(restarted) == 1 and "10%3A05%3A00Z" in restarted[0]
 
 
-def test_failed_first_delta_does_not_move_now_forward(fake, cfg, http, store, monkeypatch):
+def test_failed_first_delta_does_not_move_now_forward(mock, cfg, http, store, monkeypatch):
     clock = ["2026-10-07T10:00:00Z"]
     svc = MailService(lambda key: GraphClient(http, cfg.graph_base, TokenSource(Auth(http, cfg), store, key)),
                       store, cfg, now_iso=lambda: clock[0])
-    real, failed = fake._graph, []
+    real, failed = mock._graph, []
 
     def flaky(path, q):
         if path.endswith("/messages/delta") and not failed:
             failed.append(path)
             return httpx.Response(503, json={"error": {"code": "ServiceUnavailable"}})
         return real(path, q)
-    monkeypatch.setattr(fake, "_graph", flaky)
+    monkeypatch.setattr(mock, "_graph", flaky)
     assert poll(svc)["error"] == "graph_error"
-    fake.add_message(subject="between", received="2026-10-07T10:05:00Z")
+    mock.add_message(subject="between", received="2026-10-07T10:05:00Z")
     clock[0] = "2026-10-07T10:10:00Z"                    # the first delta failed; time moved on
     assert poll(svc)["mail"]["subject"] == "between"
 
 
-def test_changed_secret_key_is_reconnect_needed(fake, cfg, http, store):
+def test_changed_secret_key_is_reconnect_needed(mock, cfg, http, store):
     from config import AppConfig
     other = Store(cfg.db_path, AppConfig.new_secret_key())    # OUTLOOK_SECRET_KEY changed
-    svc = make_svc(fake, cfg, http, other)
+    svc = make_svc(mock, cfg, http, other)
     assert poll(svc)["error"] == "reconnect_needed"
     assert svc.whoami("key-1")["error"] == "reconnect_needed"
 
 
-def test_every_graph_request_asks_for_immutable_ids(fake, svc):
+def test_every_graph_request_asks_for_immutable_ids(mock, svc):
     poll(svc)
-    fake.add_message(subject="a", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="a", received="2026-10-07T10:01:00Z")
     poll(svc)
-    graph = [h for (_, p), h in zip(fake.requests, fake.headers) if "/oauth2/" not in p]
+    graph = [h for (_, p), h in zip(mock.requests, mock.headers) if "/oauth2/" not in p]
     assert graph and all(h.get("prefer") == 'IdType="ImmutableId"' for h in graph)
 
 
@@ -410,8 +410,8 @@ def queue_rows(svc, mid):
     return svc.store._x("SELECT message_id FROM queue WHERE message_id = ?", (mid,))
 
 
-def test_drop_old_mail_moved_in_is_delivered(fake, svc):
-    old = fake.add_message(subject="old", received="2026-10-01T08:00:00Z")
+def test_drop_old_mail_moved_in_is_delivered(mock, svc):
+    old = mock.add_message(subject="old", received="2026-10-01T08:00:00Z")
     assert drop(svc) == {"mail": None}                   # baseline round (empty folder, created)
     move(svc, old, DROP)
     mail = drop(svc)["mail"]
@@ -419,25 +419,25 @@ def test_drop_old_mail_moved_in_is_delivered(fake, svc):
     assert drop(svc) == {"mail": None}
 
 
-def test_drop_baseline_not_delivered(fake, svc):
+def test_drop_baseline_not_delivered(mock, svc):
     assert drop(svc) == {"mail": None}
-    fake.add_message(folder=DROP, subject="already there", received="2026-10-01T08:00:00Z")
+    mock.add_message(folder=DROP, subject="already there", received="2026-10-01T08:00:00Z")
     svc.store._x("DELETE FROM cursors")                  # a fresh watch: what is there now is the baseline
     assert drop(svc) == {"mail": None}
     assert drop(svc) == {"mail": None}
 
 
-def test_drop_read_change_not_redelivered(fake, svc):
+def test_drop_read_change_not_redelivered(mock, svc):
     drop(svc)
-    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    mid = mock.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
     assert drop(svc)["mail"]["id"] == mid
-    fake.touch_message(mid)
+    mock.touch_message(mid)
     assert drop(svc) == {"mail": None}                   # within the lease
 
 
-def test_drop_moved_out_and_back_is_delivered_again(fake, svc):
+def test_drop_moved_out_and_back_is_delivered_again(mock, svc):
     drop(svc)
-    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    mid = mock.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
     assert drop(svc)["mail"]["id"] == mid
     move(svc, mid, "Filed")
     assert drop(svc) == {"mail": None}
@@ -447,9 +447,9 @@ def test_drop_moved_out_and_back_is_delivered_again(fake, svc):
     assert mail["id"] == mid and mail["attempt"] == 1
 
 
-def test_drop_lease_redelivers_with_attempt_2(fake, svc):
+def test_drop_lease_redelivers_with_attempt_2(mock, svc):
     drop(svc)
-    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    mid = mock.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
     assert drop(svc)["mail"]["attempt"] == 1
     t0 = svc.store._clock()
     svc.store._clock = lambda: t0 + 599
@@ -459,87 +459,87 @@ def test_drop_lease_redelivers_with_attempt_2(fake, svc):
     assert mail["id"] == mid and mail["attempt"] == 2
 
 
-def test_drop_claim_skips_mail_no_longer_in_folder(fake, svc):
+def test_drop_claim_skips_mail_no_longer_in_folder(mock, svc):
     drop(svc)
-    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    mid = mock.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
     svc._refresh_queue_for_tests("key-1", DROP, {"mode": "drop"})   # queued, in_folder
-    fake.messages[mid]["folder"] = "projects-id"         # moved elsewhere, no delta round has seen it
+    mock.messages[mid]["folder"] = "projects-id"         # moved elsewhere, no delta round has seen it
     assert drop(svc) == {"mail": None}
     assert queue_rows(svc, mid) == []
-    assert any("/mailFolders/" in p and f"/messages/{mid}?" in p for _, p in fake.requests)   # confirmed first
+    assert any("/mailFolders/" in p and f"/messages/{mid}?" in p for _, p in mock.requests)   # confirmed first
 
 
-def test_drop_claim_parent_id_in_another_form_but_mail_in_folder_is_delivered(fake, svc):
+def test_drop_claim_parent_id_in_another_form_but_mail_in_folder_is_delivered(mock, svc):
     drop(svc)
-    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
-    fake.parent_folder_id_form = lambda fid: "AAMkAD" + fid    # Graph's parentFolderId, another id form
+    mid = mock.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    mock.parent_folder_id_form = lambda fid: "AAMkAD" + fid    # Graph's parentFolderId, another id form
     mail = drop(svc)["mail"]
     assert mail["id"] == mid and mail["attempt"] == 1
 
 
-def test_drop_folder_created_when_missing(fake, svc):
+def test_drop_folder_created_when_missing(mock, svc):
     assert drop(svc) == {"mail": None}
-    assert [f for f in fake.folders if f["displayName"] == DROP]
+    assert [f for f in mock.folders if f["displayName"] == DROP]
 
 
-def test_drop_folder_name_case_and_slash(fake, svc):
+def test_drop_folder_name_case_and_slash(mock, svc):
     a = svc.watch_scope("key-1", {"folder": "to sharepoint/", "mode": "drop"})
     b = svc.watch_scope("key-1", {"folder": "To SharePoint", "mode": "drop"})
     assert a == b and a[2] == "drop"
-    assert len([f for f in fake.folders if f["displayName"].lower() == "to sharepoint"]) == 1
+    assert len([f for f in mock.folders if f["displayName"].lower() == "to sharepoint"]) == 1
 
 
-def test_new_and_drop_scopes_are_separate(fake, svc):
+def test_new_and_drop_scopes_are_separate(mock, svc):
     assert svc.watch_scope("key-1", {"folder": "Inbox"})[0] != svc.watch_scope("key-1", {"folder": "Inbox", "mode": "drop"})[0]
     assert svc.watch_scope("key-1", {"folder": "Inbox"})[2] == "new"
     poll(svc)
     drop(svc, folder="Inbox")
-    fake.add_message(subject="both", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="both", received="2026-10-07T10:01:00Z")
     assert poll(svc)["mail"]["subject"] == "both"
     assert drop(svc, folder="Inbox")["mail"]["subject"] == "both"
 
 
-def test_bad_mode_is_invalid_argument(fake, svc):
+def test_bad_mode_is_invalid_argument(mock, svc):
     assert poll(svc, mode="sometimes")["error"] == "invalid_argument"
 
 
-def test_new_mode_attempt_is_always_1(fake, svc):
+def test_new_mode_attempt_is_always_1(mock, svc):
     poll(svc)
-    fake.add_message(subject="x", received="2026-10-07T10:01:00Z")
+    mock.add_message(subject="x", received="2026-10-07T10:01:00Z")
     assert poll(svc)["mail"]["attempt"] == 1
 
 
-def test_drop_fetch_failure_does_not_count_an_attempt(fake, svc, monkeypatch):
+def test_drop_fetch_failure_does_not_count_an_attempt(mock, svc, monkeypatch):
     drop(svc)
-    mid = fake.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
-    _fetch_fails(fake, monkeypatch, mid, lambda: httpx.Response(200, content=b"<html>gateway</html>"), times=1)
+    mid = mock.add_message(folder=DROP, subject="x", received="2026-10-01T08:00:00Z")
+    _fetch_fails(mock, monkeypatch, mid, lambda: httpx.Response(200, content=b"<html>gateway</html>"), times=1)
     assert drop(svc)["error"] == "graph_error"
     mail = drop(svc)["mail"]
     assert mail["id"] == mid and mail["attempt"] == 1
 
 
-def test_drop_sync_state_lost_keeps_baseline_and_queues_the_rest(fake, svc):
-    base = fake.add_message(folder="Inbox", subject="base", received="2026-10-01T08:00:00Z")
+def test_drop_sync_state_lost_keeps_baseline_and_queues_the_rest(mock, svc):
+    base = mock.add_message(folder="Inbox", subject="base", received="2026-10-01T08:00:00Z")
     drop(svc)
     move(svc, base, DROP)
     svc.store._x("DELETE FROM queue")
     svc.store._x("DELETE FROM cursors")
     assert drop(svc) == {"mail": None}                   # base is the baseline of this fresh watch
-    new = fake.add_message(folder=DROP, subject="new", received="2026-09-01T08:00:00Z")
-    fake.delta_link_failure = 410
+    new = mock.add_message(folder=DROP, subject="new", received="2026-09-01T08:00:00Z")
+    mock.delta_link_failure = 410
     mail = drop(svc)["mail"]
     assert mail["id"] == new and mail["attempt"] == 1
     assert drop(svc) == {"mail": None}                   # the rescan did not re-deliver the baseline
 
 
-def test_drop_sync_state_lost_forgets_mail_that_left_so_dragging_it_back_delivers_it(fake, svc):
+def test_drop_sync_state_lost_forgets_mail_that_left_so_dragging_it_back_delivers_it(mock, svc):
     drop(svc)                                            # creates the drop folder
-    base = fake.add_message(folder=DROP, subject="base", received="2026-10-01T08:00:00Z")
+    base = mock.add_message(folder=DROP, subject="base", received="2026-10-01T08:00:00Z")
     svc.store._x("DELETE FROM cursors")                  # a fresh watch: base is its baseline, never delivered
     assert drop(svc) == {"mail": None}
     assert queue_rows(svc, base) == [(base,)]
     move(svc, base, "Filed")                             # moved out while the delta link goes stale
-    fake.delta_link_failure = 410
+    mock.delta_link_failure = 410
     assert drop(svc) == {"mail": None}                   # the rescan no longer finds it: its row is forgotten
     assert queue_rows(svc, base) == []
     move(svc, base, DROP)                                # dragged back

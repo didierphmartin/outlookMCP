@@ -21,8 +21,8 @@ class AppConfig:
     host: str = "127.0.0.1"
     port: int = 8770
     attachment_max_bytes: int = 10_000_000
-    fake_graph: bool = False
-    fake_seed: str = ""                 # JSON file of messages for fake mode
+    mock_graph: bool = False
+    mock_seed: str = ""                 # JSON file of messages for mock mode
     # Events (Graph change notifications through Azure Event Hubs); README "Events".
     eventhub_connection: str = ""       # Listen connection string of the hub (EntityPath included)
     eventhub_consumer_group: str = "$Default"
@@ -42,8 +42,8 @@ class AppConfig:
 
     @property
     def events_enabled(self) -> bool:
-        """Subscriptions are created only with somewhere for Graph to send them (fake mode: in-process)."""
-        return bool(self.notification_url) or self.fake_graph
+        """Subscriptions are created only with somewhere for Graph to send them (mock mode: in-process)."""
+        return bool(self.notification_url) or self.mock_graph
 
     SCOPES: ClassVar[str] = "openid profile offline_access User.Read Mail.ReadWrite Mail.Send"
 
@@ -54,13 +54,13 @@ class AppConfig:
     @classmethod
     def from_env(cls) -> "AppConfig":
         env = os.environ
-        fake = env.get("OUTLOOK_FAKE_GRAPH", "") == "1"
-        if not fake:
+        mock = env.get("OUTLOOK_MOCK_GRAPH", "") == "1"
+        if not mock:
             missing = [n for n in ("OUTLOOK_CLIENT_ID", "OUTLOOK_SECRET_KEY") if not env.get(n)]
             if missing:
                 raise SystemExit(f"missing in .env: {', '.join(missing)} (see README)")
         return cls(
-            client_id=env.get("OUTLOOK_CLIENT_ID", "fake-client"),
+            client_id=env.get("OUTLOOK_CLIENT_ID", "mock-client"),
             secret_key=env.get("OUTLOOK_SECRET_KEY") or cls.new_secret_key(),
             db_path=env.get("OUTLOOK_DB_PATH") or str(Path.home() / "Documents" / "synergyAI" / "outlook_mcp.sqlite"),
             client_secret=env.get("OUTLOOK_CLIENT_SECRET", ""),
@@ -68,8 +68,8 @@ class AppConfig:
             host=env.get("OUTLOOK_HOST", "127.0.0.1"),
             port=int(env.get("OUTLOOK_PORT", "8770")),
             attachment_max_bytes=int(env.get("OUTLOOK_ATTACHMENT_MAX_BYTES", "10000000")),
-            fake_graph=fake,
-            fake_seed=env.get("OUTLOOK_FAKE_SEED", ""),
+            mock_graph=mock,
+            mock_seed=env.get("OUTLOOK_MOCK_SEED", ""),
             eventhub_connection=env.get("EVENTHUB_CONNECTION", ""),
             eventhub_consumer_group=env.get("EVENTHUB_CONSUMER_GROUP") or "$Default",
             notification_url=env.get("EVENTHUB_NOTIFICATION_URL", ""),

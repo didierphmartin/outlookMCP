@@ -13,11 +13,11 @@ def org_cfg(cfg):
 
 
 @pytest.fixture
-def org(fake):
-    fake.app_secret = "org-secret"
-    fake.add_mailbox("u-alice", "alice@contoso.com", "Alice")
-    fake.add_mailbox("u-eve", "eve@contoso.com", "Eve", in_group=False)
-    return fake
+def org(mock):
+    mock.app_secret = "org-secret"
+    mock.add_mailbox("u-alice", "alice@contoso.com", "Alice")
+    mock.add_mailbox("u-eve", "eve@contoso.com", "Eve", in_group=False)
+    return mock
 
 
 def test_vip_readable_and_non_vip_refused(org, http, org_cfg, capsys):

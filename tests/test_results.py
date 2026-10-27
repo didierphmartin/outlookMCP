@@ -51,18 +51,18 @@ def test_every_tool_declares_an_object_output_schema():
         assert t["description"].strip(), t["name"]
 
 
-def test_every_tool_result_matches_its_output_schema(fake, http, cfg):
-    c = app(fake, http, cfg)
+def test_every_tool_result_matches_its_output_schema(mock, http, cfg):
+    c = app(mock, http, cfg)
     assert success(c, "connect_status", {"connect_id": "nope"}) == {"status": "unknown"}
     start = success(c, "connect_start", {"method": "device"})
     assert success(c, "connect_status", {"connect_id": start["connect_id"]})["status"] == "pending"
-    fake.device_state = "connected"
+    mock.device_state = "connected"
     c.app.state.clock_offset[0] += 10
     key = success(c, "connect_status", {"connect_id": start["connect_id"]})["connection_key"]
     assert success(c, "whoami", key=key)["account"] == "me@contoso.com"
     assert {"Inbox"} <= {f["path"] for f in success(c, "list_folders", key=key)["folders"]}
     assert success(c, "poll_new_mail", {"folder": "Inbox"}, key=key) == {"mail": None}
-    fake.add_message(subject="Invoice", received="2099-01-01T00:00:00Z",
+    mock.add_message(subject="Invoice", received="2099-01-01T00:00:00Z",
                      attachments=[("a.txt", "text/plain", b"hello")])
     mail = success(c, "poll_new_mail", {"folder": "Inbox"}, key=key)["mail"]
     assert mail["subject"] == "Invoice" and mail["attachments"][0]["name"] == "a.txt"
@@ -72,8 +72,8 @@ def test_every_tool_result_matches_its_output_schema(fake, http, cfg):
     assert success(c, "move_mail", {"mail_id": mail["id"], "folder": "Done/2026"}, key=key)["created"] == ["Done", "Done/2026"]
 
 
-def test_failures_are_tool_errors_carrying_code_and_message(fake, http, cfg):
-    c = app(fake, http, cfg)
+def test_failures_are_tool_errors_carrying_code_and_message(mock, http, cfg):
+    c = app(mock, http, cfg)
     for args, key, code in (({}, None, "not_connected"), ({}, "bogus", "reconnect_needed")):
         r = raw(c, "poll_new_mail", args, key)
         assert r["isError"] is True and "structuredContent" not in r

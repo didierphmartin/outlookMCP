@@ -194,23 +194,23 @@ Graph also drops a "Validation: Testing client application reachability" message
 subscription is created; it names no subscription and is ignored, as is any notification whose
 `clientState` is not the subscription's secret.
 
-## 7. Fake mode
+## 7. Mock mode
 
-`OUTLOOK_FAKE_GRAPH=1 ./run.sh` runs against a built-in fake of Microsoft sign-in and Graph: no
+`OUTLOOK_MOCK_GRAPH=1 ./run.sh` runs against a built-in mock of Microsoft sign-in and Graph: no
 Microsoft account, client id or secret key needed. Device sign-in succeeds on the first
-`connect_status`. `OUTLOOK_FAKE_SEED=seed.json` preloads messages (a JSON list shaped like the
-`/fake/messages` body). Extra endpoints, fake mode only:
+`connect_status`. `OUTLOOK_MOCK_SEED=seed.json` preloads messages (a JSON list shaped like the
+`/mock/messages` body). Extra endpoints, mock mode only:
 
 | Endpoint | Body | Effect |
 |---|---|---|
-| `POST /fake/messages` | `{folder?, subject, sender, received?, attachments?: [{name, content_type, text}]}` | Adds a message; returns `{id}`. `received` defaults to now. |
-| `GET /fake/requests` | — | Every request the server made to "Microsoft", e.g. to prove a poll fetched no attachment. |
-| `POST /fake/device` | `{"state": "connected"}` | Next device-code answer: `pending`, `connected`, `blocked` (Conditional Access) or `declined`. |
+| `POST /mock/messages` | `{folder?, subject, sender, received?, attachments?: [{name, content_type, text}]}` | Adds a message; returns `{id}`. `received` defaults to now. |
+| `GET /mock/requests` | — | Every request the server made to "Microsoft", e.g. to prove a poll fetched no attachment. |
+| `POST /mock/device` | `{"state": "connected"}` | Next device-code answer: `pending`, `connected`, `blocked` (Conditional Access) or `declined`. |
 
-In fake mode events are on without a hub: a fake message added to a watched folder notifies in-process, so
+In mock mode events are on without a hub: a mock message added to a watched folder notifies in-process, so
 `wait_for_new` answers `ready` / `event` at once.
 
-`./smoke.sh` runs an end-to-end check in fake mode on port 8779.
+`./smoke.sh` runs an end-to-end check in mock mode on port 8779.
 
 ## 8. Organization connection (VIP mailboxes)
 

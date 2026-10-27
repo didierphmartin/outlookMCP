@@ -67,8 +67,8 @@ def test_empty_body_still_renders():
     assert len(r.pages) == 1 and "Quarterly report" in text_of(data)
 
 
-def test_tool_returns_base64_pdf(svc, fake):
-    mid = fake.add_message(subject="Hi", attachments=[("logo.png", "image/png", png(), True, False, "c1"),
+def test_tool_returns_base64_pdf(svc, mock):
+    mid = mock.add_message(subject="Hi", attachments=[("logo.png", "image/png", png(), True, False, "c1"),
                                                       ("a.txt", "text/plain", b"abc")],
                            body_html='<p>x</p><img src="cid:c1">')
     out = svc.mail_to_pdf("key-1", {"mail_id": mid})
@@ -89,36 +89,36 @@ def test_plain_text_body_renders():
     assert "Line one" in t and "Line two <not a tag>" in t and "Quarterly report" in t
 
 
-def test_tool_lists_cloud_link_attachments_as_not_stored(svc, fake):
-    mid = fake.add_message(subject="Hi", attachments=[("Budget.xlsx", "", b"", False, False, None, True),
+def test_tool_lists_cloud_link_attachments_as_not_stored(svc, mock):
+    mid = mock.add_message(subject="Hi", attachments=[("Budget.xlsx", "", b"", False, False, None, True),
                                                       ("a.txt", "text/plain", b"abc")])
     t = text_of(base64.b64decode(svc.mail_to_pdf("key-1", {"mail_id": mid})["base64"]))
     assert "Budget.xlsx (cloud link, not stored)" in t and "a.txt" in t
 
 
-def test_tool_embeds_inline_image_with_graph_valid_requests(svc, fake):
+def test_tool_embeds_inline_image_with_graph_valid_requests(svc, mock):
     """Real Graph rejects contentId in a base-type $select (400): contentId and bytes come from the attachment GET."""
-    mid = fake.add_message(subject="Hi", attachments=[("logo.png", "image/png", png(), True, False, "c1"),
+    mid = mock.add_message(subject="Hi", attachments=[("logo.png", "image/png", png(), True, False, "c1"),
                                                       ("a.txt", "text/plain", b"abc")],
                            body_html='<p>x</p><img src="cid:c1">')
     out = svc.mail_to_pdf("key-1", {"mail_id": mid})
     assert "error" not in out, out
     assert len(PdfReader(io.BytesIO(base64.b64decode(out["base64"]))).pages[0].images) == 1
-    assert not any(f"{mid}-a1" in p for _, p in fake.requests)      # a non-inline attachment is never fetched
+    assert not any(f"{mid}-a1" in p for _, p in mock.requests)      # a non-inline attachment is never fetched
 
 
-def test_tool_skips_oversized_inline_image(svc, fake):
-    mid = fake.add_message(subject="Hi", attachments=[("logo.png", "image/png", png(), True, False, "c1")],
+def test_tool_skips_oversized_inline_image(svc, mock):
+    mid = mock.add_message(subject="Hi", attachments=[("logo.png", "image/png", png(), True, False, "c1")],
                            body_html='<img src="cid:c1">')
     object.__setattr__(svc.cfg, "attachment_max_bytes", 10)      # AppConfig is frozen
     out = svc.mail_to_pdf("key-1", {"mail_id": mid})
     assert len(PdfReader(io.BytesIO(base64.b64decode(out["base64"]))).pages[0].images) == 0
 
 
-def test_fake_rejects_subtype_property_in_select(fake):
-    mid = fake.add_message(subject="Hi")
+def test_mock_rejects_subtype_property_in_select(mock):
+    mid = mock.add_message(subject="Hi")
     for q in ({"$expand": ["attachments($select=id,contentId)"]}, {"$select": ["id,contentBytes"]}):
-        resp = fake._graph(f"/me/messages/{mid}", q)
+        resp = mock._graph(f"/me/messages/{mid}", q)
         assert resp.status_code == 400 and "on type 'microsoft.graph.attachment'" in resp.json()["error"]["message"]
 
 

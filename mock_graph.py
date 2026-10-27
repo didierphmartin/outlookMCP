@@ -1,4 +1,4 @@
-"""An httpx transport that plays Microsoft identity + Graph for tests and OUTLOOK_FAKE_GRAPH=1.
+"""An httpx transport that plays Microsoft identity + Graph for tests and OUTLOOK_MOCK_GRAPH=1.
 
 Implements only what this server calls. Every request is logged in .requests so tests can prove,
 for example, that a poll never fetched attachment content.
@@ -18,7 +18,7 @@ FOLDERS = [{"id": "inbox-id", "displayName": "Inbox", "wellKnown": "inbox"},
            {"id": "projects-id", "displayName": "Projects"}]
 
 
-class FakeGraph:
+class MockGraph:
     def __init__(self):
         self.requests: list[tuple[str, str]] = []
         self.posted: list[tuple[str, dict]] = []  # (path, JSON body) of each POST to Graph
@@ -228,7 +228,7 @@ class FakeGraph:
                 return httpx.Response(200, json={"id": sid, **self.subscriptions[sid]})
             case ["subscriptions", _]:
                 return httpx.Response(404, json={"error": {"code": "ResourceNotFound"}})
-        return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
+        return httpx.Response(404, json={"error": {"code": "NotImplementedInMock", "path": path}})
 
     def _subscribe(self, body: dict) -> httpx.Response:
         if self.subscription_status:
@@ -366,7 +366,7 @@ class FakeGraph:
                 out = {**m, "parentFolderId": form(m["folder"])}
                 out["attachments"] = [self._expanded(a, q) for a in m["attachments"]]
                 return httpx.Response(200, json=out)
-        return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
+        return httpx.Response(404, json={"error": {"code": "NotImplementedInMock", "path": path}})
 
     def _post(self, path: str, body: dict) -> httpx.Response:
         self.posted.append((path, body))
@@ -394,7 +394,7 @@ class FakeGraph:
                     f["parent"] = self._folder_id(parts[2])
                 self.folders.append(f)
                 return httpx.Response(201, json=f)
-        return httpx.Response(404, json={"error": {"code": "NotImplementedInFake", "path": path}})
+        return httpx.Response(404, json={"error": {"code": "NotImplementedInMock", "path": path}})
 
     def _delta(self, fid: str, q: dict) -> httpx.Response:
         """Like real Graph: pages are not oldest-first (newest-first here), changed messages come again,
