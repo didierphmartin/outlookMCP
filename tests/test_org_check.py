@@ -26,6 +26,14 @@ def test_vip_readable_and_non_vip_refused(org, http, org_cfg, capsys):
     assert capsys.readouterr().out.splitlines() == ["token: ok", "group: 1 members", "vip: ok", "non-vip: refused"]
 
 
+def test_hidden_member_addresses_fail(org, http, org_cfg, capsys):
+    org.forbid_mailbox("u-eve")
+    org.member_profiles = False
+    assert org_check.main(["u-alice", "u-eve"], http, org_cfg) == 1
+    assert capsys.readouterr().out.splitlines()[1] == \
+        "group: 1 members, 1 without a readable address (grant User.ReadBasic.All)"
+
+
 def test_non_vip_readable_fails(org, http, org_cfg, capsys):
     assert org_check.main(["u-alice", "u-eve"], http, org_cfg) == 1
     assert capsys.readouterr().out.splitlines()[-1] == "non-vip: READABLE (scope not applied)"

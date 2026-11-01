@@ -205,3 +205,12 @@ def test_empty_group_is_an_error_naming_the_group(mock, http, ocfg):
     assert r["error"] == "no_mailboxes"
     assert "vip-group" in r["message"]
     assert subscribed(mock) == []
+
+
+def test_members_without_readable_address_name_the_missing_permission(mock, http, ocfg):
+    """GroupMember.Read.All alone: Graph lists the members as ids only, and the wait says which permission is missing."""
+    mock.member_profiles = False
+    c, key = org_app(mock, http, ocfg)
+    r = wait(c, key)
+    assert r["error"] == "no_mailboxes"
+    assert "2 member(s)" in r["message"] and "User.ReadBasic.All" in r["message"]

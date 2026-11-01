@@ -208,10 +208,14 @@ class Waiter:
         except Exception as e:  # noqa: BLE001 -- the tool never raises
             return self.mail._failure(e)
         if org and not watches:   # an empty group watches nothing: say so, or it looks like a quiet mailbox
-            group = self.mail.directory(connection_key).group
-            return {"error": "no_mailboxes",
-                    "message": f"the organization's group {group} has no mailbox: add the people to it in Entra "
-                               "(direct members with a mailbox)"}
+            d = self.mail.directory(connection_key)
+            if d.unreadable:   # Graph lists members as bare ids without User.ReadBasic.All
+                message = (f"the group {d.group} has {d.unreadable} member(s) whose address the app cannot read: grant it "
+                           "the Microsoft Graph application permission User.ReadBasic.All in Entra (admin consent)")
+            else:
+                message = (f"the group {d.group} has no mailbox: add the people to it in Entra "
+                           "(direct members with a mailbox)")
+            return {"error": "no_mailboxes", "message": message}
         kid = self.store.key_id(connection_key)
         keys, off = [], []
         for _scope, folder_id, _mode, mailbox_id in watches:

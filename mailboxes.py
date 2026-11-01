@@ -22,6 +22,7 @@ class MailboxDirectory:
     def __init__(self, graph, group: str, clock=time.time, refresh_s: int = 900):
         self.graph, self.group, self.clock, self.refresh_s = graph, group, clock, refresh_s
         self._members: list[Mailbox] | None = None
+        self.unreadable = 0   # members of the last read without an address (no mailbox, or no User.ReadBasic.All)
         self._read_at = 0.0
         self._lock = threading.Lock()
         self._listeners = []
@@ -54,12 +55,15 @@ class MailboxDirectory:
         return members
 
     def _read(self) -> list[Mailbox]:
-        users, url = [], f"/groups/{self.group}/members/microsoft.graph.user"
+        users, url, unreadable = [], f"/groups/{self.group}/members/microsoft.graph.user", 0
         params = {"$select": "id,mail,displayName"}
         while url:
             page = self.graph.get(url, params)
-            users += [u for u in page.get("value", []) if u.get("mail")]      # no mail: no mailbox
+            values = page.get("value", [])
+            users += [u for u in values if u.get("mail")]      # no mail: no mailbox
+            unreadable += sum(1 for u in values if not u.get("mail"))
             url, params = page.get("@odata.nextLink"), None
+        self.unreadable = unreadable
         names = [self.safe_name(u.get("displayName") or "", u["mail"]) for u in users]
         folded = [n.casefold() for n in names]                             # SharePoint names ignore case
         return [Mailbox(u["id"], u["mail"], n if folded.count(n.casefold()) == 1 else self.safe_name(f"{n} ({u['mail']})"))

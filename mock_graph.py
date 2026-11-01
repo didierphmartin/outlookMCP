@@ -59,6 +59,7 @@ class MockGraph:
         self.app_tokens: set[str] = set()
         self.forbidden_mailboxes: set[str] = set()
         self.group_page_size = 100
+        self.member_profiles = True                # False: the app lacks User.ReadBasic.All, members come back as ids only
         self._box: str | None = None               # the mailbox the request in flight addresses (None: /me)
         self._removed_box: dict[str, str | None] = {}   # removed message id -> its mailbox
 
@@ -209,7 +210,8 @@ class MockGraph:
         return m if m is not None and m["mailbox"] == self._box else None
 
     def _members(self, q: dict) -> httpx.Response:
-        members = [{"id": uid, "mail": b["mail"], "displayName": b["displayName"]}
+        members = [{"id": uid, "mail": b["mail"], "displayName": b["displayName"]} if self.member_profiles
+                   else {"id": uid, "mail": None, "displayName": None}
                    for uid, b in self.mailboxes.items() if b["in_group"]]
         skip = int(q.get("$skiptoken", ["0"])[0])
         body = {"value": members[skip:skip + self.group_page_size]}
