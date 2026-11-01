@@ -193,3 +193,15 @@ def test_created_notification_never_crosses_connections(mock, http, ocfg):
     created(c, org, mail_resource(fid, "u-bob"), mb)         # its own subscription: reset and woken
     assert wakes.take_any(org_keys)
     assert call(c, "poll_new_mail", DROP, key=org)["mail"]["attempt"] == 1
+
+
+def test_empty_group_is_an_error_naming_the_group(mock, http, ocfg):
+    """A group with no member mailbox watches nothing: the wait says so instead of looking like a quiet mailbox."""
+    mock.add_mailbox("u-carol", "carol@contoso.com", "Carol Diaz", in_group=False)
+    c = app(mock, http, ocfg)
+    s = call(c, "connect_start", {"method": "organization"})
+    key = call(c, "connect_status", {"connect_id": s["connect_id"]})["connection_key"]
+    r = wait(c, key)
+    assert r["error"] == "no_mailboxes"
+    assert "vip-group" in r["message"]
+    assert subscribed(mock) == []

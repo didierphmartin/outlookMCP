@@ -168,7 +168,8 @@ TOOLS = [
                      "next, until it returns null. With events on (Microsoft Graph change notifications), ready comes "
                      "within about a minute of new mail; with events off, or as a safety net, ready also comes every "
                      "WATCH_FALLBACK_S seconds, and on the first wait after the server starts. status=timeout after "
-                     "timeout_s: just wait again. Never returns mail itself. Extra error code: invalid_argument." + _FAILS),
+                     "timeout_s: just wait again. Never returns mail itself. Extra error codes: invalid_argument; no_mailboxes "
+                     "(an organization connection whose group has no member mailbox)." + _FAILS),
      "inputSchema": {"type": "object", "properties": {
          "poll": {"type": "string", "enum": ["poll_new_mail"], "description": "The poll to wait for. Default poll_new_mail."},
          "args": {"type": "object", "description": "That poll's arguments, e.g. {\"folder\": \"Inbox\"}: the same folder, "

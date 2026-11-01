@@ -207,6 +207,11 @@ class Waiter:
             watches = self.mail.watch_scopes(connection_key, poll_args)
         except Exception as e:  # noqa: BLE001 -- the tool never raises
             return self.mail._failure(e)
+        if org and not watches:   # an empty group watches nothing: say so, or it looks like a quiet mailbox
+            group = self.mail.directory(connection_key).group
+            return {"error": "no_mailboxes",
+                    "message": f"the organization's group {group} has no mailbox: add the people to it in Entra "
+                               "(direct members with a mailbox)"}
         kid = self.store.key_id(connection_key)
         keys, off = [], []
         for _scope, folder_id, _mode, mailbox_id in watches:
@@ -217,7 +222,7 @@ class Waiter:
         events = {"events": "off", "reason": "; ".join(off)[:300]} if off else {"events": "on"}
         if events["events"] == "on" and self.listener_error():
             events = {"events": "off", "reason": "event hub: " + self.listener_error()}
-        return {"keys": keys, "scopes": [(kid, scope) for scope, *_ in watches] or [(kid, "")],  # empty group: one timer
+        return {"keys": keys, "scopes": [(kid, scope) for scope, *_ in watches],
                 "events": events, "fallback_s": self.cfg.org_fallback_s if org else self.cfg.watch_fallback_s,
                 "queued": any(self.store.has_undelivered(connection_key, scope, self.mail.lease_s(mode))
                               for scope, _f, mode, _m in watches)}
