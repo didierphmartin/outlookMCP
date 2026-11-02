@@ -55,10 +55,13 @@ the Exchange Administrator role). About 20 minutes.
    (`OUTLOOK_ORG_CLIENT_ID`) and the **Directory (tenant) ID** (`OUTLOOK_ORG_TENANT`). Then
    **Certificates & secrets → New client secret**, and copy its **Value** column at once
    (`OUTLOOK_ORG_CLIENT_SECRET`): it is shown only once, and the **Secret ID** next to it is not the secret.
-2. **One Graph permission:** API permissions, Microsoft Graph, Application permissions,
-   `GroupMember.Read.All`, then Grant admin consent. **Add no Mail permission here.** Microsoft: permissions
-   granted in Entra and in Exchange are a union, so an unscoped `Mail.Read`/`Mail.ReadWrite` in Entra
-   cancels the scope and opens every mailbox.
+2. **Two Graph permissions:** API permissions, Microsoft Graph, Application permissions,
+   `GroupMember.Read.All` (lists the group's members) and `User.ReadBasic.All` (their addresses and names:
+   without it Graph returns the members as bare ids, and the server finds no mailbox), then Grant admin
+   consent. **Add no Mail permission here.** Microsoft: permissions granted in Entra and in Exchange are a
+   union, so an unscoped `Mail.Read`/`Mail.ReadWrite` in Entra cancels the scope and opens every mailbox.
+   Granted to a server already running: restart it, as its access token (kept up to an hour) carries the
+   permissions it had when issued.
 3. **The VIP group:** a mail-enabled security group "SynergyAI VIP" with the VIPs as members. Only
    direct members are in scope (Microsoft: nested group members are out of scope): nested groups are not
    followed (Exchange's scope ignores them too); keep the VIP group flat. Microsoft 365 groups,
@@ -122,7 +125,8 @@ After the 30 minutes to 2 hours, with the four variables in `.env`:
 
 It prints only `token: ok`, `group: <n> members`, `vip: ok|<error code>` and
 `non-vip: refused|READABLE (scope not applied)` (never the secret or a token) and exits 0 only when the VIP's
-mail folders are readable and the non-VIP's are refused. Any other code on the non-VIP line (for example
+mail folders are readable and the non-VIP's are refused. `group: <n> members, <h> without a readable address (grant User.ReadBasic.All)`
+also exits 1: `User.ReadBasic.All` is missing (step 2). Any other code on the non-VIP line (for example
 `not_found` for a mistyped address) also exits 1. `READABLE` means an Entra Mail permission is still
 granted (step 2) or the scope is wrong.
 
