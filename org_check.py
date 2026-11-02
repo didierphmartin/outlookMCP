@@ -2,7 +2,7 @@
 
 Reads .env next to this file the way run.sh does, gets an app-only token, lists the group's members, reads
 the VIP's mail folders and tries the non-VIP's. Prints only fixed status lines (never the secret or a token).
-Exit 0 only when the VIP is readable and the non-VIP is refused.
+Exit 0 only when every member's address is readable, the VIP is readable and the non-VIP is refused.
 """
 import os
 import sys
@@ -60,12 +60,14 @@ def main(argv: list[str], http: httpx.Client | None = None, cfg: AppConfig | Non
         return 1
     print("token: ok")
     try:
-        n, url, params = 0, f"/groups/{cfg.org_group}/members/microsoft.graph.user", {"$select": "id"}
+        n, hidden, url, params = 0, 0, f"/groups/{cfg.org_group}/members/microsoft.graph.user", {"$select": "id,mail"}
         while url:
             page = graph.get(url, params)
             n += len(page.get("value", []))
+            hidden += sum(1 for u in page.get("value", []) if not u.get("mail"))
             url, params = page.get("@odata.nextLink"), None
-        print(f"group: {n} members")
+        # The server watches only members whose address it reads: without User.ReadBasic.All Graph gives ids only.
+        print(f"group: {n} members" + (f", {hidden} without a readable address (grant User.ReadBasic.All)" if hidden else ""))
     except GraphError as e:
         print(f"group: {e.code}")
         return 1
@@ -74,7 +76,7 @@ def main(argv: list[str], http: httpx.Client | None = None, cfg: AppConfig | Non
     other_state = _folders(graph, other)
     print("non-vip: " + ("READABLE (scope not applied)" if other_state == "ok" else
                          "refused" if other_state == "forbidden" else other_state))
-    return 0 if vip_state == "ok" and other_state == "forbidden" else 1
+    return 0 if vip_state == "ok" and other_state == "forbidden" and not hidden else 1
 
 
 if __name__ == "__main__":

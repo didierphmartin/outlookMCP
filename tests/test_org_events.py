@@ -193,3 +193,24 @@ def test_created_notification_never_crosses_connections(mock, http, ocfg):
     created(c, org, mail_resource(fid, "u-bob"), mb)         # its own subscription: reset and woken
     assert wakes.take_any(org_keys)
     assert call(c, "poll_new_mail", DROP, key=org)["mail"]["attempt"] == 1
+
+
+def test_empty_group_is_an_error_naming_the_group(mock, http, ocfg):
+    """A group with no member mailbox watches nothing: the wait says so instead of looking like a quiet mailbox."""
+    mock.add_mailbox("u-carol", "carol@contoso.com", "Carol Diaz", in_group=False)
+    c = app(mock, http, ocfg)
+    s = call(c, "connect_start", {"method": "organization"})
+    key = call(c, "connect_status", {"connect_id": s["connect_id"]})["connection_key"]
+    r = wait(c, key)
+    assert r["error"] == "no_mailboxes"
+    assert "vip-group" in r["message"]
+    assert subscribed(mock) == []
+
+
+def test_members_without_readable_address_name_the_missing_permission(mock, http, ocfg):
+    """GroupMember.Read.All alone: Graph lists the members as ids only, and the wait says which permission is missing."""
+    mock.member_profiles = False
+    c, key = org_app(mock, http, ocfg)
+    r = wait(c, key)
+    assert r["error"] == "no_mailboxes"
+    assert "2 member(s)" in r["message"] and "User.ReadBasic.All" in r["message"]
