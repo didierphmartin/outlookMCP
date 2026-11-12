@@ -1,0 +1,106 @@
+{
+  "name": "outlook_mcp",
+  "runtime": "python",
+  "description": "Outlook mail through Microsoft Graph",
+  "exclude": [
+    "smoke.sh",
+    "pytest.ini"
+  ],
+  "install": "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
+  "start": "./run.sh",
+  "env": [
+    {
+      "name": "OUTLOOK_CLIENT_ID",
+      "label": "Entra ID app (client) ID (App registrations; \"Allow public client flows\" on)",
+      "required": true
+    },
+    {
+      "name": "OUTLOOK_SECRET_KEY",
+      "label": "Encryption key for stored sign-in tokens (Fernet key); changing it means every mailbox reconnects",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "OUTLOOK_PUBLIC_URL",
+      "label": "Public URL for the browser sign-in fallback; register <URL>/auth/callback as a redirect URI (optional)"
+    },
+    {
+      "name": "OUTLOOK_CLIENT_SECRET",
+      "label": "Client secret, only for a confidential app registration (optional)",
+      "secret": true
+    },
+    {
+      "name": "OUTLOOK_HOST",
+      "label": "Host to listen on",
+      "default": "127.0.0.1"
+    },
+    {
+      "name": "OUTLOOK_PORT",
+      "label": "Port",
+      "default": "8770"
+    },
+    {
+      "name": "OUTLOOK_DB_PATH",
+      "label": "Token database file (optional)"
+    },
+    {
+      "name": "OUTLOOK_ATTACHMENT_MAX_BYTES",
+      "label": "Attachment size cap in bytes",
+      "default": "10000000"
+    },
+    {
+      "name": "EVENTHUB_CONNECTION",
+      "label": "Events: Event Hub listen-only connection string, with EntityPath=<hub>",
+      "secret": true,
+      "required": true
+    },
+    {
+      "name": "EVENTHUB_NOTIFICATION_URL",
+      "label": "Events: EventHub:https://<namespace>.servicebus.windows.net/eventhubname/<hub>?tenantId=<tenant>",
+      "required": true
+    },
+    {
+      "name": "EVENTHUB_CONSUMER_GROUP",
+      "label": "Events: consumer group",
+      "default": "$Default"
+    },
+    {
+      "name": "WATCH_FALLBACK_S",
+      "label": "Safety poll for new mail, in seconds",
+      "default": "900"
+    },
+    {
+      "name": "OUTLOOK_ORG_TENANT",
+      "label": "Organization app: Directory (tenant) ID (VIP mailboxes)",
+      "group": "organization",
+      "required": true
+    },
+    {
+      "name": "OUTLOOK_ORG_CLIENT_ID",
+      "label": "Organization app: Application (client) ID, not the Entra ID app's",
+      "group": "organization",
+      "required": true
+    },
+    {
+      "name": "OUTLOOK_ORG_CLIENT_SECRET",
+      "label": "Organization app: client secret Value (not its Secret ID)",
+      "secret": true,
+      "group": "organization",
+      "required": true
+    },
+    {
+      "name": "OUTLOOK_ORG_GROUP",
+      "label": "Organization: Object ID of the VIP group",
+      "group": "organization"
+    },
+    {
+      "name": "OUTLOOK_ORG_FALLBACK_S",
+      "label": "Organization watch poll, in seconds",
+      "default": "60"
+    },
+    {
+      "name": "OUTLOOK_MOCK_GRAPH",
+      "label": "Use the built-in test mailbox (1 = on, optional)"
+    }
+  ]
+}
