@@ -6,4 +6,5 @@ pypdf>=6
 docx2txt>=0.8
 pytest>=8
 azure-eventhub>=5.11
+websocket-client>=1.6   # Event Hub over port 443 (AMQP over WebSockets)
 fpdf2>=2.7

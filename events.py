@@ -139,9 +139,12 @@ class EventHubListener:  # pragma: no cover -- needs a real hub; the router it f
     def start(self) -> None:
         """A bad connection string never stops the server: events are off and wait_for_new says why."""
         try:
-            from azure.eventhub import EventHubConsumerClient
+            from azure.eventhub import EventHubConsumerClient, TransportType
+            # AMQP over WebSockets (port 443): many networks block AMQP's own port 5671, which left the listener
+            # timing out; 443 is open wherever HTTPS is.
             self.client = EventHubConsumerClient.from_connection_string(
-                self.cfg.eventhub_connection, consumer_group=self.cfg.eventhub_consumer_group)
+                self.cfg.eventhub_connection, consumer_group=self.cfg.eventhub_consumer_group,
+                transport_type=TransportType.AmqpOverWebsocket)
         except Exception as e:  # noqa: BLE001
             self.error = f"EVENTHUB_CONNECTION: {e}"[:300]
             return
